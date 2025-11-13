@@ -7,8 +7,6 @@ import json
 
 import logging
 
-import locale
-
 from datetime import datetime, timedelta
 
 import pandas as pd

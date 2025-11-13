@@ -34,8 +34,8 @@ def retrieve_items_for_queue() -> list[dict]:
     logger.info("Export data from hub in SQL database.")
     file_path, file_name = helper_functions.export_egenbefordring_from_hub(conn_str, config.TMP_PATH, number_of_weeks=number_of_weeks)
 
-    print(f"file_path: {file_path}")
-    print(f"file_name: {file_name}")
+    logger.info(f"file_path: {file_path}")
+    logger.info(f"file_name: {file_name}")
 
     data.append(
         {
