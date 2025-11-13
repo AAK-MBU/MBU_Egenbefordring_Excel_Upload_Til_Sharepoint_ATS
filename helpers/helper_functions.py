@@ -145,8 +145,6 @@ def get_week_dates(number_of_weeks: int = None):
                - end_of_week: the end of the current week (Sunday)
     """
 
-    locale.setlocale(locale.LC_TIME, "da_DK.UTF-8")
-
     today = (
         datetime.now() - timedelta(weeks=number_of_weeks)
         if number_of_weeks
