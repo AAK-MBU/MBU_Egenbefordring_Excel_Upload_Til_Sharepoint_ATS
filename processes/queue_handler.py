@@ -1,20 +1,50 @@
 """Module to hande queue population"""
 
+import os
+
+import time
 import asyncio
 import json
 import logging
 
 from automation_server_client import Workqueue
 
-from helpers import config
+from helpers import config, helper_functions
 
 logger = logging.getLogger(__name__)
 
 
 def retrieve_items_for_queue() -> list[dict]:
     """Function to populate queue"""
+
     data = []
     references = []
+
+    number_of_weeks = 1
+
+    conn_str = os.getenv("DBCONNECTIONSTRINGPROD")
+
+    logger.info("Create tmp-folder.")
+    if not os.path.exists(config.TMP_PATH):
+        os.makedirs(config.TMP_PATH)
+
+        while not os.path.exists(config.TMP_PATH):
+            time.sleep(1)
+
+    logger.info("Export data from hub in SQL database.")
+    file_path, file_name = helper_functions.export_egenbefordring_from_hub(conn_str, config.TMP_PATH, number_of_weeks=number_of_weeks)
+
+    print(f"file_path: {file_path}")
+    print(f"file_name: {file_name}")
+
+    data.append(
+        {
+            "file_path": file_path,
+            "file_name": file_name,
+        }
+    )
+
+    references.append(file_name)
 
     items = [
         {"reference": ref, "data": d} for ref, d in zip(references, data, strict=True)

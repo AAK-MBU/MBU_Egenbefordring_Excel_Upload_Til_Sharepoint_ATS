@@ -1,5 +1,7 @@
 """Module for general configurations of the process"""
 
+import os
+
 MAX_RETRY = 10
 
 # ----------------------
@@ -35,6 +37,24 @@ QUEUE_NAME = None
 MAX_TASK_COUNT = 100
 
 # ----------------------
-FOLDER_NAME = "General"
-SITE_NAME = "MBU-RPA-Egenbefordring"
-TMP_PATH = "C:\\tmp\\Egen_befordring"
+TMP_PATH = "C:\\tmp\\Egen_befordring_ATS"
+
+SHAREPOINT_SITE_URL = "https://aarhuskommune.sharepoint.com/"
+
+# SHAREPOINT_SITE_NAME = "MBU-RPA-Egenbefordring"
+SHAREPOINT_SITE_NAME = "MBURPA"
+
+DOCUMENT_LIBRARY = "Delte dokumenter"
+
+SHAREPOINT_KWARGS = {
+    "tenant": os.getenv("TENANT"),
+    "client_id": os.getenv("CLIENT_ID"),
+    "thumbprint": os.getenv("APPREG_THUMBPRINT"),
+    "cert_path": os.getenv("GRAPH_CERT_PEM"),
+    "site_url": f"{SHAREPOINT_SITE_URL}",
+    "site_name": f"{SHAREPOINT_SITE_NAME}",
+    "document_library": f"{DOCUMENT_LIBRARY}",
+}
+
+# FOLDER_NAME = "General"
+FOLDER_NAME = "Egenbefordring"

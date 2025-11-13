@@ -1,21 +1,34 @@
-## How to use this template
+## Kørselsgodtgørelse for Skolekørsler - Create Excel & Upload to Sharepoint.
 
-The repository has been tagged as a template repository. This means you can create a new repository based on this code using the [GitHub instructions](https://docs.github.com/en/repositories/creating-and-managing-repositories/creating-a-repository-from-a-template)
+This robot is part of the 'MBU Koerselsgodtgoerelse Skolekoersler' process.
 
+### Process Overview
 
-### Alternative method: checkout the repository and remove git bindings
-Replace `<new-folder-name>` with your desired folder name:
-```sh
-git clone https://github.com/odense-rpa/process-template.git <new-folder-name>
+The process consists of four main robots working in sequence:
 
-cd <new-folder-name>
+1. **Create Excel and Upload to SharePoint (This Robot)**:  
+   The first robot retrieves and exports weekly 'Egenbefordring' data from a database to an Excel file, which is then uploaded to SharePoint at the following location: `MBU - RPA - Egenbefordring/Dokumenter/General`. Once the file is processed, personnel will move it to `MBU - RPA - Egenbefordring/Dokumenter/General/Til udbetaling`. Run it with the 'Single Trigger' or with the Scheduled Trigger'.
 
-rm -rf .git
-git init
-git add .
-git commit -m "Initial commit from process-template"
+2. **Queue Uploader**:  
+   The second robot retrieves data from the Excel file and uploads it to the **Koerselsgodtgoerelse_egenbefordring** queue using [OpenOrchestrator](https://github.com/itk-dev-rpa/OpenOrchestrator). Run it with the 'Single Trigger'.
 
-git remote add origin <new-repo-url>
-git push -u origin main
-```
+3. **Queue Handler**:  
+   The third robot, triggered by the Queue Trigger in OpenOrchestrator, processes the queue elements by creating tickets in OPUS.
 
+4. **Update SharePoint**:  
+   The fourth robot cleans and updates the files in SharePoint by uploading the updated Excel file and attachments of any failed elements. Run it with the 'Single Trigger'.
+
+### The Create Excel and Upload to Sharepoint Process
+
+    -
+
+### Process and Related Robots
+
+1. **Create Excel & Upload to SharePoint**: (This Robot)
+2. **Queue Uploader** [Queue Uploader](https://github.com/AAK-MBU/MBU_Koerselsgodtgoerelse_Skolekoersler_Queue_Uploader).
+3. **Queue Handler**: [Queue Handler](https://github.com/AAK-MBU/MBU_Koerselsgodtgoerelse_Skolekoersler_Queue__Handler)
+4. **Update SharePoint**: [Update Sharepoint](https://github.com/AAK-MBU/MBU_Koerselsgodtgoerelse_Skolekoersler_Update_Sharepoint)
+
+### Arguments
+
+No arguments.
