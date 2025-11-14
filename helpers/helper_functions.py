@@ -2,7 +2,6 @@
 Helper functions
 """
 
-import os
 import json
 
 import logging
@@ -12,44 +11,21 @@ from datetime import datetime, timedelta
 import pandas as pd
 import pyodbc
 
-import openpyxl
-from openpyxl.utils.dataframe import dataframe_to_rows
+from io import BytesIO
 
 logger = logging.getLogger(__name__)
 
 
-def export_egenbefordring_from_hub(connection_string: str, temp_path: str, number_of_weeks: int = None):
+def export_egenbefordring_from_hub(connection_string: str, sheet_name: str, start_date: str = "", end_date: str = ""):
     """
-    Retrieves 'Egenbefordring' data for the current week from the database and exports it to an Excel file.
+    Retrieves 'Egenbefordring' data for the selected week range and returns an Excel file as bytes.
 
-    Args:
-        connection_string (str): The database connection string.
-        temp_path (str): The path where the Excel file will be saved.
-
-    The function performs the following steps:
-        - Retrieves the start and end dates for the current week.
-        - Queries the database for records that fall within the week.
-        - Normalizes and formats the JSON data retrieved.
-        - Exports the normalized data to an Excel file with the current week's details.
+    Returns:
+        bytes: Excel file content
+        str: File name (without .xlsx extension)
     """
 
-    current_week_start, current_week_end = get_week_dates(
-        number_of_weeks=number_of_weeks
-    )
-
-    start_date = current_week_start.strftime("%Y-%m-%d %H:%M:%S")
-    end_date = current_week_end.strftime("%Y-%m-%d %H:%M:%S")
-
-    current_week_number = datetime.date(
-        datetime.now() - timedelta(weeks=number_of_weeks)
-        if number_of_weeks
-        else datetime.now()
-    ).isocalendar()[1]
-
-    file_name = f"Egenbefordring_{current_week_number}_{current_week_start.strftime('%d%m%Y')}_{current_week_end.strftime('%d%m%Y')}"
-
-    xl_sheet_name = f"{current_week_number}_{datetime.now().year}"
-
+    # Columns modifications from your original logic
     add_columns = {
         "aendret_beloeb_i_alt": [],
         "godkendt": [],
@@ -60,9 +36,11 @@ def export_egenbefordring_from_hub(connection_string: str, temp_path: str, numbe
     }
 
     remove_columns = ["koerselsliste_tomme_felter_tjek_"]
-
     move_columns_to_last = ["test", "attachments", "uuid"]
 
+    # -------------------------------------------------------------
+    # 2. Query database
+    # -------------------------------------------------------------
     conn = pyodbc.connect(connection_string)
     cursor = conn.cursor()
 
@@ -92,39 +70,52 @@ def export_egenbefordring_from_hub(connection_string: str, temp_path: str, numbe
     logger.info(f"\n\n{query}\n\n")
 
     cursor.execute(query)
-    result = cursor.fetchall()
-
-    file_path = rf"{temp_path}\{file_name}.xlsx"
-
-    for row in result:
-        form_id = row.form_id
-
-        received_date = row.modtagelsesdato
-
-        datetime_obj = datetime.fromisoformat(received_date)
-        formatted_datetime_str = datetime_obj.strftime("%Y-%m-%d %H:%M:%S")
-
-        json_data = json.loads(row.form_data)
-        json_data_normalized = pd.json_normalize(
-            json_data["data"], sep="_", max_level=0
-        )
-
-        json_data_normalized["modtagelsesdato"] = formatted_datetime_str
-        json_data_normalized["uuid"] = form_id
-
-        export_to_excel(
-            file_path,
-            f"{xl_sheet_name}",
-            json_data_normalized,
-            add_columns,
-            remove_columns,
-            move_columns_to_last,
-        )
+    rows = cursor.fetchall()
 
     cursor.close()
     conn.close()
 
-    return file_path, file_name
+    # -------------------------------------------------------------
+    # 3. Build DataFrame(s)
+    # -------------------------------------------------------------
+    all_dataframes = []
+
+    for row in rows:
+        form_id = row.form_id
+        received_date = row.modtagelsesdato
+
+        dt = datetime.fromisoformat(received_date)
+        formatted_dt = dt.strftime("%Y-%m-%d %H:%M:%S")
+
+        raw_json = json.loads(row.form_data)
+        df = pd.json_normalize(raw_json["data"], sep="_", max_level=0)
+
+        df["modtagelsesdato"] = formatted_dt
+        df["uuid"] = form_id
+
+        all_dataframes.append(df)
+
+    if not all_dataframes:
+        return None, None
+
+    final_df = pd.concat(all_dataframes, ignore_index=True)
+
+    # -------------------------------------------------------------
+    # 4. Apply your existing modifiers
+    # -------------------------------------------------------------
+    final_df = modify_dataframe(
+        final_df,
+        add_columns=add_columns,
+        remove_columns=remove_columns,
+        move_columns_to_last=move_columns_to_last
+    )
+
+    # -------------------------------------------------------------
+    # 5. Convert → Excel bytes (in-memory)
+    # -------------------------------------------------------------
+    excel_bytes = dataframe_to_excel_bytes(final_df, sheet_name)
+
+    return excel_bytes
 
 
 def get_week_dates(number_of_weeks: int = None):
@@ -155,32 +146,6 @@ def get_week_dates(number_of_weeks: int = None):
     end_of_week = start_of_week + timedelta(days=6, seconds=86399)
 
     return start_of_week, end_of_week
-
-
-def export_to_excel(file_path, sheet_name, dataframe_data, add_columns=None, remove_columns=None, move_columns_to_last=None):
-    """
-    Exports a pandas DataFrame to an Excel file. If the file exists, it appends the data to the specified sheet.
-    If the file does not exist, it creates a new Excel file with the data.
-
-    Args:
-        file_path (str): The path to the Excel file.
-        sheet_name (str): The name of the sheet to append the data to.
-        dataframe_data (pd.DataFrame): The pandas DataFrame containing the data to export.
-        add_columns (dict, optional): Dictionary of columns to add, where keys are column names and values are the data for the columns.
-        remove_columns (list, optional): List of column names to remove from the DataFrame.
-        move_columns_to_last (list, optional): List of column names to move to the last position.
-
-    Raises:
-        ValueError: If the sheet name does not exist in the existing workbook or if the lengths of add_columns values do not match the DataFrame length.
-    """
-
-    dataframe_data = modify_dataframe(dataframe_data, add_columns, remove_columns, move_columns_to_last)
-
-    if os.path.isfile(file_path):
-        append_to_existing_sheet(file_path, sheet_name, dataframe_data)
-
-    else:
-        create_new_excel(file_path, sheet_name, dataframe_data)
 
 
 def modify_dataframe(dataframe_data, add_columns=None, remove_columns=None, move_columns_to_last=None):
@@ -225,43 +190,12 @@ def modify_dataframe(dataframe_data, add_columns=None, remove_columns=None, move
     return dataframe_data
 
 
-def append_to_existing_sheet(file_path, sheet_name, dataframe_data):
-    """
-    Appends data to an existing sheet in an Excel file.
+def dataframe_to_excel_bytes(df: pd.DataFrame, sheet_name: str) -> bytes:
+    """Convert a DataFrame to an Excel file and return the content as bytes."""
 
-    Args:
-        file_path (str): The path to the Excel file.
-        sheet_name (str): The name of the sheet to append the data to.
-        dataframe_data (pd.DataFrame): The pandas DataFrame containing the data to append.
+    stream = BytesIO()
 
-    Raises:
-        ValueError: If the sheet name does not exist in the existing workbook.
-    """
+    with pd.ExcelWriter(stream, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False, sheet_name=sheet_name)
 
-    workbook = openpyxl.load_workbook(file_path)
-    if sheet_name not in workbook.sheetnames:
-        raise ValueError(f"The sheet name '{sheet_name}' does not exist in the workbook.")
-
-    sheet = workbook[sheet_name]
-    for row in dataframe_to_rows(dataframe_data, header=False, index=False):
-        row = [str(cell) if cell is not None else "" for cell in row]
-
-        sheet.append(row)
-
-    workbook.save(file_path)
-
-    workbook.close()
-
-
-def create_new_excel(file_path, sheet_name, dataframe_data):
-    """
-    Creates a new Excel file with the provided data.
-
-    Args:
-        file_path (str): The path to the Excel file.
-        sheet_name (str): The name of the sheet to create.
-        dataframe_data (pd.DataFrame): The pandas DataFrame containing the data to export.
-    """
-
-    with pd.ExcelWriter(path=file_path, engine='openpyxl') as writer:  # pylint: disable=abstract-class-instantiated
-        dataframe_data.to_excel(writer, index=False, sheet_name=sheet_name)
+    return stream.getvalue()

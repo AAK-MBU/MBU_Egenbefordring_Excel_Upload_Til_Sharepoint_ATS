@@ -26,19 +26,8 @@ SCREENSHOT_SENDER = "robot@friend.dk"
 # Constant/Credential names
 ERROR_EMAIL = "Error Email"
 
-
-# Queue specific configs
-# ----------------------
-
-# The name of the job queue (if any)
-QUEUE_NAME = None
-
-# The limit on how many queue elements to process
-MAX_TASK_COUNT = 100
-
-# ----------------------
-TMP_PATH = "C:\\tmp\\Egen_befordring_ATS"
-
+# SHAREPOINT stuff
+# ----------------
 SHAREPOINT_SITE_URL = "https://aarhuskommune.sharepoint.com/"
 
 # SHAREPOINT_SITE_NAME = "MBU-RPA-Egenbefordring"

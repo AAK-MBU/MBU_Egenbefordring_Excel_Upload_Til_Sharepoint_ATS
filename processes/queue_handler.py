@@ -1,11 +1,10 @@
 """Module to hande queue population"""
 
-import os
-
-import time
 import asyncio
 import json
 import logging
+
+from datetime import datetime, timedelta
 
 from automation_server_client import Workqueue
 
@@ -22,25 +21,32 @@ def retrieve_items_for_queue() -> list[dict]:
 
     number_of_weeks = 1
 
-    conn_str = os.getenv("DBCONNECTIONSTRINGPROD")
+    current_week_start, current_week_end = helper_functions.get_week_dates(number_of_weeks)
 
-    logger.info("Create tmp-folder.")
-    if not os.path.exists(config.TMP_PATH):
-        os.makedirs(config.TMP_PATH)
+    current_week_number = datetime.date(
+        datetime.now() - timedelta(weeks=number_of_weeks)
+        if number_of_weeks else datetime.now()
+    ).isocalendar()[1]
 
-        while not os.path.exists(config.TMP_PATH):
-            time.sleep(1)
+    start_date = current_week_start.strftime("%Y-%m-%d %H:%M:%S")
+    end_date = current_week_end.strftime("%Y-%m-%d %H:%M:%S")
 
-    logger.info("Export data from hub in SQL database.")
-    file_path, file_name = helper_functions.export_egenbefordring_from_hub(conn_str, config.TMP_PATH, number_of_weeks=number_of_weeks)
+    file_name = (
+        f"Egenbefordring_{current_week_number}_"
+        f"{current_week_start.strftime('%d%m%Y')}_"
+        f"{current_week_end.strftime('%d%m%Y')}"
+    )
 
-    logger.info(f"file_path: {file_path}")
+    sheet_name = f"{current_week_number}_{datetime.now().year}"
+
     logger.info(f"file_name: {file_name}")
 
     data.append(
         {
-            "file_path": file_path,
             "file_name": file_name,
+            "sheet_name": sheet_name,
+            "start_date": start_date,
+            "end_date": end_date,
         }
     )
 
