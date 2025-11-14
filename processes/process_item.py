@@ -1,11 +1,12 @@
 """Module to handle item processing"""
 # from mbu_rpa_core.exceptions import ProcessError, BusinessError
 
+import os
 import logging
 
 from mbu_msoffice_integration.sharepoint_class import Sharepoint
 
-from helpers import config
+from helpers import config, helper_functions
 
 logger = logging.getLogger(__name__)
 
@@ -16,10 +17,22 @@ def process_item(item_data: dict, item_reference: str):
     assert item_data, "Item data is required"
     assert item_reference, "Item reference is required"
 
-    file_path = item_data.get("file_path")
+    sharepoint_api = Sharepoint(**config.SHAREPOINT_KWARGS)
 
-    logger.info(f"Upload file to sharepoint: {file_path}")
+    db_connection_string = os.getenv("DBCONNECTIONSTRINGPROD")
 
-    sp = Sharepoint(**config.SHAREPOINT_KWARGS)
+    file_name = item_data.get("file_name")
+    sheet_name = item_data.get("sheet_name")
+    start_date = item_data.get("start_date")
+    end_date = item_data.get("end_date")
 
-    sp.upload_file(folder_name=config.FOLDER_NAME, file_path=file_path)
+    logger.info("Exporting data from sql table")
+    bytes_data = helper_functions.export_egenbefordring_from_hub(
+        connection_string=db_connection_string,
+        sheet_name=sheet_name,
+        start_date=start_date,
+        end_date=end_date,
+    )
+
+    logger.info(f"Upload file to sharepoint: {file_name}")
+    sharepoint_api.upload_file_from_bytes(binary_content=bytes_data, file_name=f"{file_name}.xlsx", folder_name=config.FOLDER_NAME)
