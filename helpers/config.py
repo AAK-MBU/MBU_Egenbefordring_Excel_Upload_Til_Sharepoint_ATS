@@ -30,8 +30,7 @@ ERROR_EMAIL = "Error Email"
 # ----------------
 SHAREPOINT_SITE_URL = "https://aarhuskommune.sharepoint.com/"
 
-# SHAREPOINT_SITE_NAME = "MBU-RPA-Egenbefordring"
-SHAREPOINT_SITE_NAME = "MBURPA"
+SHAREPOINT_SITE_NAME = "MBU-RPA-Egenbefordring"
 
 DOCUMENT_LIBRARY = "Delte dokumenter"
 
@@ -45,5 +44,4 @@ SHAREPOINT_KWARGS = {
     "document_library": f"{DOCUMENT_LIBRARY}",
 }
 
-# FOLDER_NAME = "General"
-FOLDER_NAME = "Egenbefordring"
+FOLDER_NAME = "General"
