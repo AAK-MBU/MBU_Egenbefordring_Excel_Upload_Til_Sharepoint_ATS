@@ -24,9 +24,13 @@ logger = logging.getLogger(__name__)
 # ║ 🔥 REMOVE BEFORE DEPLOYMENT (TEMP OVERRIDES) 🔥 ║
 # ╚══════════════════════════════════════════════╝
 ### This block handles the workqueue id selection ###
-# import os
-# from dotenv import load_dotenv
-# load_dotenv()
+import os
+from dotenv import load_dotenv
+load_dotenv()
+
+os.environ["ATS_TOKEN"] = "usgGW3t_5_x1kTfWPs-S97bTBpSCvYR7V2YA3c1Zyh9GtQarjJNz0N8cxEQbRzxGqyXZyG2fFE_Y0BA2Tlp_VVPTv8F60X-bNjVCO71EirOhkhXPilyKG3pUjX91FdJRwzyo-etldwjGzrZmnSOW4zk_7_4CuR-hVadk8mXE698"
+os.environ["ATS_URL"] = "https://mbu-ats-dev.adm.aarhuskommune.dk/api"
+
 # if "--borger_fyldt_22" in sys.argv:
 #     os.environ["ATS_WORKQUEUE_OVERRIDE"] = os.getenv("ATS_WORKQUEUE_ID_BORGER_FYLDT_22")
 
@@ -36,15 +40,15 @@ logger = logging.getLogger(__name__)
 # elif "--aftale_oprettet_i_solteq" in sys.argv:
 #     os.environ["ATS_WORKQUEUE_OVERRIDE"] = os.getenv("ATS_WORKQUEUE_ID_AFTALE_OPRETTET_I_SOLTEQ")
 
-# ### This block disables SSL verification and overrides env vars ###
-# import requests
-# import urllib3
-# urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-# _old_request = requests.Session.request
-# def unsafe_request(self, *args, **kwargs):
-#     kwargs['verify'] = False
-#     return _old_request(self, *args, **kwargs)
-# requests.Session.request = unsafe_request
+### This block disables SSL verification and overrides env vars ###
+import requests
+import urllib3
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+_old_request = requests.Session.request
+def unsafe_request(self, *args, **kwargs):
+    kwargs['verify'] = False
+    return _old_request(self, *args, **kwargs)
+requests.Session.request = unsafe_request
 # ╔══════════════════════════════════════════════╗
 # ║ 🔥 REMOVE BEFORE DEPLOYMENT (TEMP OVERRIDES) 🔥 ║
 # ╚══════════════════════════════════════════════╝
@@ -169,6 +173,10 @@ if __name__ == "__main__":
 
     prod_workqueue = ats.workqueue()
     process = ats.process
+
+    ### REMOVE !!! ###
+    prod_workqueue.clear_workqueue()
+    ### REMOVE !!! ###
 
     if "--queue" in sys.argv:
         asyncio.run(populate_queue(prod_workqueue))
