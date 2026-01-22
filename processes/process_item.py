@@ -31,10 +31,9 @@ def process_item(item_data: dict, item_reference: str):
     logger.info("Exporting data from sql table")
     bytes_data = helper_functions.export_egenbefordring_from_hub(
         connection_string=db_connection_string,
-        file_name=file_name,
-        sheet_name=sheet_name,
         start_date=start_date,
         end_date=end_date,
+        sheet_name=sheet_name,
     )
 
     mburpa_sharepoint_api = Sharepoint(**config.MBURPA_SHAREPOINT_KWARGS)

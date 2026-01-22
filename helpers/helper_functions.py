@@ -2,8 +2,6 @@
 Helper functions
 """
 
-import sys
-
 import json
 import logging
 from datetime import datetime, timedelta
@@ -15,12 +13,14 @@ import pyodbc
 logger = logging.getLogger(__name__)
 
 
+# --------------------------------------------------------------------
+# Date helpers
+# --------------------------------------------------------------------
 def get_week_dates(number_of_weeks: int = None):
     """
     Returns the start and end dates of the current week.
 
-    The week is considered to start on Monday at 00:00:00 and end on Sunday at 23:59:59.
-    If number_of_weeks is provided, it adjusts the current date by subtracting the specified number of weeks.
+    The week starts Monday 00:00:00 and ends Sunday 23:59:59.
     """
 
     today = (
@@ -30,33 +30,31 @@ def get_week_dates(number_of_weeks: int = None):
     )
 
     start_of_week = today - timedelta(days=today.weekday())
-
     start_of_week = start_of_week.replace(hour=0, minute=0, second=0, microsecond=0)
     end_of_week = start_of_week + timedelta(days=6, seconds=86399)
 
     return start_of_week, end_of_week
 
 
+# --------------------------------------------------------------------
+# Core export
+# --------------------------------------------------------------------
 def export_egenbefordring_from_hub(
     connection_string: str,
-    file_name: str,
-    sheet_name: str,
     start_date: str = "",
     end_date: str = "",
+    sheet_name: str = "",
 ):
     """
     Retrieves Egenbefordring submissions, validates morning/afternoon and distance,
     recalculates payout when needed, and exports a fully structured Excel sheet.
     """
 
-    # --------------------------------------------------------------------
-    # 1. Fetch submissions
-    # --------------------------------------------------------------------
     submissions_query = """
         SELECT
             form_id,
             CASE
-                WHEN JSON_VALUE(form_data, '$.completed') IS NOT NULL 
+                WHEN JSON_VALUE(form_data, '$.completed') IS NOT NULL
                     THEN JSON_VALUE(form_data, '$.completed')
                 ELSE JSON_VALUE(form_data, '$.entity.completed[0].value')
             END AS modtagelsesdato,
@@ -65,13 +63,9 @@ def export_egenbefordring_from_hub(
             [RPA].[journalizing].[view_Journalizing]
         WHERE
             (
-                (
-                    TRY_CAST(JSON_VALUE(form_data, '$.completed') AS DATETIMEOFFSET) BETWEEN ? AND ?
-                )
+                TRY_CAST(JSON_VALUE(form_data, '$.completed') AS DATETIMEOFFSET) BETWEEN ? AND ?
                 OR
-                (
-                    TRY_CAST(JSON_VALUE(form_data, '$.entity.completed[0].value') AS DATETIMEOFFSET) BETWEEN ? AND ?
-                )
+                TRY_CAST(JSON_VALUE(form_data, '$.entity.completed[0].value') AS DATETIMEOFFSET) BETWEEN ? AND ?
             )
             AND form_type = 'egenbefordring_ifm_til_skolekoer'
     """
@@ -103,273 +97,16 @@ def export_egenbefordring_from_hub(
 
     final_rows = []
 
-    # --------------------------------------------------------------------
-    # 2. Loop through submissions
-    # --------------------------------------------------------------------
     for sub in submissions:
-        form_id = sub.get("form_id")
-        modtagelsesdato = sub.get("modtagelsesdato")
-
-        form_data = json.loads(sub.get("form_data"))
-        data = form_data.get("data", {})
-
-        barnets_cpr = data.get("cpr_barnet")
-
-        # Fetch child's befordring rows
-        bd_rows = get_items_from_query_with_params(
+        row = process_submission(
+            sub=sub,
             connection_string=connection_string,
-            query=befordrings_query,
-            params=[barnets_cpr],
+            befordrings_query=befordrings_query,
         )
 
-        if bd_rows:
-            allowed_morgen = False
-            allowed_efter = False
+        final_rows.append(row)
 
-            for br in bd_rows or []:
-                tid = (br.get("TidspunktForBevilling") or "").lower()
-
-                if tid == "morgen":
-                    allowed_morgen = True
-
-                elif tid == "eftermiddag":
-                    allowed_efter = True
-
-                elif "morgen" in tid and "eftermiddag" in tid:
-                    allowed_morgen = True
-                    allowed_efter = True
-
-            # ---------------------------
-            # Determine allowed distance
-            # ---------------------------
-            allowed_distance = None
-
-            # Priority 1: BevilgetKoereAfstand
-            for br in bd_rows:
-                if br.get("BevilgetKoereAfstand"):
-                    allowed_distance = convert_value_to_float(br["BevilgetKoereAfstand"])
-
-                    break
-
-            # Priority 2: KortestGaaAfstand
-            if allowed_distance is None:
-                for br in bd_rows:
-                    if br.get("KortestGaaAfstand"):
-                        allowed_distance = convert_value_to_float(br["KortestGaaAfstand"])
-
-                        break
-
-            if allowed_distance is None:
-                # We have rows, but no usable distance at all
-                no_bevilling_found = True
-                allowed_distance = 0
-
-            else:
-                no_bevilling_found = False
-
-            # ---------------------------
-            # Validate per day
-            # ---------------------------
-            test_list = data.get("test", [])
-
-            # We only hard-fail ("ikke godkendt") if there is no bevilling at all.
-            submission_valid = not no_bevilling_found
-
-            # Flags for aggregated comments
-            wrong_morgen = False
-            wrong_efter = False
-            distance_violation = False
-            distance_example = None  # (reported, allowed)
-
-            valid_legs = 0  # number of legs we actually pay for
-
-            for entry in test_list:
-                km_til = convert_value_to_float(entry.get("til_skole"))
-                km_fra = convert_value_to_float(entry.get("til_hjem"))
-
-                # ------------------------
-                # MORGEN (til_skole)
-                # ------------------------
-                if km_til is not None and km_til > 0:
-                    if not allowed_morgen:
-                        # Wrong time slot, no payment for this leg
-                        wrong_morgen = True
-                    else:
-                        # Time-of-day allowed ⇒ we pay for this leg
-                        valid_legs += 1
-
-                        # Check if they overtyped distance
-                        if allowed_distance > 0 and km_til > allowed_distance and not distance_violation:
-                            distance_violation = True
-                            distance_example = (km_til, allowed_distance)
-
-                # ------------------------
-                # EFT (til_hjem)
-                # ------------------------
-                if km_fra is not None and km_fra > 0:
-                    if not allowed_efter:
-                        wrong_efter = True
-                    else:
-                        valid_legs += 1
-
-                        if allowed_distance > 0 and km_fra > allowed_distance and not distance_violation:
-                            distance_violation = True
-                            distance_example = (km_fra, allowed_distance)
-
-            # ---------------------------
-            # Build evt_kommentar + aendret beløb
-            # ---------------------------
-            comments = []
-
-            if no_bevilling_found:
-                submission_valid = False
-                comments.append("Ingen bevilling fundet")
-
-            if wrong_morgen:
-                comments.append("Borger har indtastet morgen, men har kun bevilget eftermiddag.")
-
-            if wrong_efter:
-                comments.append("Borger har indtastet eftermiddag, men har kun bevilget morgen.")
-
-            if distance_violation and distance_example:
-                reported, allowed = distance_example
-                comments.append(
-                    f"Borger har indtastet {reported} km men har kun bevilget {allowed} km."
-                )
-
-            kommentar = "; ".join(comments) if comments else ""
-
-            # Recalculate beløb only if we actually have a bevilling + distance
-            aendret_beloeb = ""
-
-            if not no_bevilling_found and allowed_distance > 0:
-                # If there were *any* comments (time or distance), we correct
-                if comments:
-                    try:
-                        aendret_beloeb = round(valid_legs * allowed_distance * 2.23, 2)
-                    except Exception:
-                        aendret_beloeb = ""
-                else:
-                    # No violations → keep as empty (original beløb used)
-                    aendret_beloeb = ""
-
-        else:
-            submission_valid = False
-            aendret_beloeb = ""
-            kommentar = "Ingen bevilling fundet"
-
-        # ---------------------------
-        # Build Excel row
-        # ---------------------------
-        row_dict = dict(data)
-        row_dict["modtagelsesdato"] = modtagelsesdato
-        row_dict["uuid"] = form_id
-
-        row_dict["aendret_beloeb_i_alt"] = aendret_beloeb
-        row_dict["godkendt"] = "X" if submission_valid else ""
-        row_dict["godkendt_af"] = ""
-        row_dict["behandlet_ok"] = ""
-        row_dict["behandlet_fejl"] = ""
-        row_dict["evt_kommentar"] = kommentar
-
-        row_dict.setdefault("test", data.get("test"))
-        row_dict.setdefault("attachments", data.get("attachments"))
-
-        final_rows.append(row_dict)
-
-    # --------------------------------------------------------------------
-    # 3. Build DataFrame
-    # --------------------------------------------------------------------
-    df = build_dataframe(final_rows=final_rows)
-
-    # --------------------------------------------------------------------
-    # 4. Save Excel locally
-    # --------------------------------------------------------------------
-    output_path = f"./{file_name}.xlsx"
-    with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
-        df.to_excel(writer, index=False)
-
-    # --------------------------------------------------------------------
-    # 5. Upload Excel to SharePoint
-    # --------------------------------------------------------------------
-    excel_bytes = dataframe_to_excel_bytes(df=df, sheet_name=sheet_name)
-
-    return excel_bytes
-
-
-def get_items_from_query_with_params(
-    connection_string,
-    query: str,
-    params: list | tuple | None,
-):
-    """
-    Executes a parameterized SQL query and returns rows as list of dicts.
-    """
-
-    result = []
-
-    try:
-        with pyodbc.connect(connection_string) as conn:
-            with conn.cursor() as cursor:
-
-                if params:
-                    cursor.execute(query, params)
-                else:
-                    cursor.execute(query)
-
-                rows = cursor.fetchall()
-
-                columns = [column[0] for column in cursor.description]
-
-                result = [
-                    {
-                        column: value.strip() if isinstance(value, str) else value
-                        for column, value in zip(columns, row)
-                    }
-                    for row in rows
-                ]
-
-    except pyodbc.Error as e:
-        logger.info(f"Database error: {str(e)}")
-        logger.info(f"{connection_string}")
-        raise
-
-    except Exception as e:
-        logger.info(f"Unexpected error: {str(e)}")
-        raise
-
-    return result or None
-
-
-def convert_value_to_float(v):
-    """
-    Docstring for convert_value_to_float
-    
-    :param v: Description
-    """
-
-    if v is None or v == "":
-        return None
-
-    try:
-        return float(str(v).replace(",", "."))
-
-    except Exception as e:
-        logger.info(f"Hit an exception when converting to float: {e}")
-
-        return None
-
-
-def build_dataframe(final_rows: list) -> pd.DataFrame:
-    """
-    Docstring for build_dataframe
-
-    :param final_rows: Description
-    :type final_rows: list
-    """
-
-    df = pd.DataFrame(final_rows)
-    df = df.where(pd.notnull(df), "")
+    df = pd.DataFrame(final_rows).where(pd.notnull, "")
 
     desired_order = [
         "adresse1",
@@ -410,15 +147,288 @@ def build_dataframe(final_rows: list) -> pd.DataFrame:
 
     df = df[desired_order]
 
-    return df
-
-
-def dataframe_to_excel_bytes(df: pd.DataFrame, sheet_name: str) -> bytes:
-    """Convert a DataFrame to an Excel file and return the content as bytes."""
-
     stream = BytesIO()
 
     with pd.ExcelWriter(stream, engine="openpyxl") as writer:
         df.to_excel(writer, index=False, sheet_name=sheet_name)
 
-    return stream.getvalue()
+    excel_bytes = stream.getvalue()
+
+    return excel_bytes
+
+
+# --------------------------------------------------------------------
+# Submission processing
+# --------------------------------------------------------------------
+def process_submission(sub, connection_string, befordrings_query):
+    """
+    Process each individual submissions and validate data
+    """
+
+    form_id = sub.get("form_id")
+    modtagelsesdato = sub.get("modtagelsesdato")
+
+    form_data = json.loads(sub.get("form_data"))
+    data = form_data.get("data", {})
+
+    barnets_cpr = data.get("cpr_barnet")
+
+    bd_rows = get_items_from_query_with_params(
+        connection_string=connection_string,
+        query=befordrings_query,
+        params=[barnets_cpr],
+    )
+
+    if not bd_rows:
+        return build_final_row(
+            data=data,
+            form_id=form_id,
+            modtagelsesdato=modtagelsesdato,
+            submission_valid=False,
+            aendret_beloeb="",
+            kommentar="Ingen aktiv bevilling fundet",
+        )
+
+    allowed_morgen = False
+    allowed_efter = False
+
+    for br in bd_rows:
+        tid = (br.get("TidspunktForBevilling") or "").lower()
+
+        if "morgen" in tid:
+            allowed_morgen = True
+
+        if "eftermiddag" in tid:
+            allowed_efter = True
+
+    allowed_distance = float(0)
+    no_bevilling_found = True
+
+    for br in bd_rows:
+        if br.get("BevilgetKoereAfstand") is not None:
+            allowed_distance = convert_value_to_float(br["BevilgetKoereAfstand"])
+            no_bevilling_found = False
+
+            break
+
+        if br.get("KortestGaaAfstand") is not None:
+            allowed_distance = convert_value_to_float(br["KortestGaaAfstand"])
+            no_bevilling_found = False
+
+    validation = validate_entries(
+        test_list=data.get("test", []),
+        allowed_morgen=allowed_morgen,
+        allowed_efter=allowed_efter,
+        allowed_distance=allowed_distance,
+    )
+
+    submission_valid = not no_bevilling_found
+    comments = []
+
+    if no_bevilling_found:
+        submission_valid = False
+        comments.append("Ingen aktiv bevilling fundet")
+
+    if validation["wrong_morgen"]:
+        comments.append("Borger har indtastet morgen, men har kun bevilget eftermiddag.")
+
+    if validation["wrong_efter"]:
+        comments.append("Borger har indtastet eftermiddag, men har kun bevilget morgen.")
+
+    if validation["distance_violation"]:
+        reported, allowed = validation["distance_example"]
+        comments.append(
+            f"Borger har indtastet {reported} km men har kun bevilget {allowed} km."
+        )
+
+    kommentar = "; ".join(comments)
+
+    aendret_beloeb = ""
+    if submission_valid and allowed_distance > 0 and comments:
+        aendret_beloeb = round(
+            validation["valid_legs"] * allowed_distance * 2.23, 2
+        )
+
+    return build_final_row(
+        data=data,
+        form_id=form_id,
+        modtagelsesdato=modtagelsesdato,
+        submission_valid=submission_valid,
+        aendret_beloeb=aendret_beloeb,
+        kommentar=kommentar,
+    )
+
+
+def validate_entries(
+    test_list,
+    allowed_morgen,
+    allowed_efter,
+    allowed_distance,
+):
+    """
+    Helper function to validate the citizens driving entries.
+    """
+
+    wrong_morgen = False
+    wrong_efter = False
+    distance_violation = False
+    distance_example = None
+    valid_legs = 0
+
+    for entry in test_list:
+        km_til = convert_value_to_float(entry.get("til_skole"))
+        km_fra = convert_value_to_float(entry.get("til_hjem"))
+
+        # Morning leg
+        is_valid, is_wrong, distance_violation, example = validate_leg(
+            km=km_til,
+            allowed=allowed_morgen,
+            allowed_distance=allowed_distance,
+            distance_violation=distance_violation,
+        )
+
+        if is_wrong:
+            wrong_morgen = True
+
+        if is_valid:
+            valid_legs += 1
+
+        if example:
+            distance_example = example
+
+        # Afternoon leg
+        is_valid, is_wrong, distance_violation, example = validate_leg(
+            km=km_fra,
+            allowed=allowed_efter,
+            allowed_distance=allowed_distance,
+            distance_violation=distance_violation,
+        )
+
+        if is_wrong:
+            wrong_efter = True
+
+        if is_valid:
+            valid_legs += 1
+
+        if example:
+            distance_example = example
+
+    return {
+        "wrong_morgen": wrong_morgen,
+        "wrong_efter": wrong_efter,
+        "distance_violation": distance_violation,
+        "distance_example": distance_example,
+        "valid_legs": valid_legs,
+    }
+
+
+def validate_leg(
+    km,
+    allowed,
+    allowed_distance,
+    distance_violation,
+):
+    """
+    Validate a single leg (morning or afternoon).
+
+    Returns:
+        (is_valid_leg, is_wrong_time, new_distance_violation, distance_example)
+    """
+
+    if km is None or km <= 0:
+        return False, False, distance_violation, None
+
+    if not allowed:
+        return False, True, distance_violation, None
+
+    # Valid leg
+    if allowed_distance <= 0:
+        return True, False, distance_violation, None
+
+    if distance_violation:
+        return True, False, distance_violation, None
+
+    if km <= allowed_distance:
+        return True, False, distance_violation, None
+
+    # Distance violation
+    return True, False, True, (km, allowed_distance)
+
+
+# --------------------------------------------------------------------
+# Row / output helpers
+# --------------------------------------------------------------------
+def build_final_row(
+    data,
+    form_id,
+    modtagelsesdato,
+    submission_valid,
+    aendret_beloeb,
+    kommentar,
+):
+    """
+    Small helper to build the final row that will be appended to the sheet
+    """
+
+    row = dict(data)
+
+    row["modtagelsesdato"] = modtagelsesdato
+    row["uuid"] = form_id
+    row["aendret_beloeb_i_alt"] = aendret_beloeb
+    row["godkendt"] = "X" if submission_valid else ""
+    row["godkendt_af"] = ""
+    row["behandlet_ok"] = ""
+    row["behandlet_fejl"] = ""
+    row["evt_kommentar"] = kommentar
+
+    row.setdefault("test", data.get("test"))
+    row.setdefault("attachments", data.get("attachments"))
+
+    return row
+
+
+# --------------------------------------------------------------------
+# DB + conversion helpers
+# --------------------------------------------------------------------
+def get_items_from_query_with_params(
+    connection_string,
+    query,
+    params,
+):
+    """
+    Helper function to retrieve the items from an SQL query, using params in place of hardcoded values
+    """
+
+    try:
+        with pyodbc.connect(connection_string) as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(query, params or [])
+                rows = cursor.fetchall()
+                columns = [c[0] for c in cursor.description]
+
+                return [
+                    {
+                        col: val.strip() if isinstance(val, str) else val
+                        for col, val in zip(columns, row)
+                    }
+                    for row in rows
+                ]
+
+    except Exception:
+        logger.exception("Database error")
+        raise
+
+
+def convert_value_to_float(v):
+    """
+    Small helper function to safely convert a value to float
+    """
+
+    if v in (None, ""):
+        return None
+
+    try:
+        return float(str(v).replace(",", "."))
+
+    except Exception:
+        return None
