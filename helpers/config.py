@@ -47,16 +47,16 @@ SHAREPOINT_KWARGS = {
 FOLDER_NAME = "General"
 
 # MBURPA SharePoint
-MBURPA_SHAREPOINT_SITE_NAME = "MBURPA"
+# MBURPA_SHAREPOINT_SITE_NAME = "MBURPA"
 
-MBURPA_SHAREPOINT_KWARGS = {
-    "tenant": os.getenv("TENANT"),
-    "client_id": os.getenv("CLIENT_ID"),
-    "thumbprint": os.getenv("APPREG_THUMBPRINT"),
-    "cert_path": os.getenv("GRAPH_CERT_PEM"),
-    "site_url": f"{SHAREPOINT_SITE_URL}",
-    "site_name": f"{MBURPA_SHAREPOINT_SITE_NAME}",
-    "document_library": f"{DOCUMENT_LIBRARY}",
-}
+# MBURPA_SHAREPOINT_KWARGS = {
+#     "tenant": os.getenv("TENANT"),
+#     "client_id": os.getenv("CLIENT_ID"),
+#     "thumbprint": os.getenv("APPREG_THUMBPRINT"),
+#     "cert_path": os.getenv("GRAPH_CERT_PEM"),
+#     "site_url": f"{SHAREPOINT_SITE_URL}",
+#     "site_name": f"{MBURPA_SHAREPOINT_SITE_NAME}",
+#     "document_library": f"{DOCUMENT_LIBRARY}",
+# }
 
-MBURPA_FOLDER_NAME = "Egenbefordring"
+# MBURPA_FOLDER_NAME = "Egenbefordring"
