@@ -23,20 +23,6 @@ logger = logging.getLogger(__name__)
 # ╔══════════════════════════════════════════════╗
 # ║ 🔥 REMOVE BEFORE DEPLOYMENT (TEMP OVERRIDES) 🔥 ║
 # ╚══════════════════════════════════════════════╝
-### This block handles the workqueue id selection ###
-# import os
-# from dotenv import load_dotenv
-# load_dotenv()
-# if "--borger_fyldt_22" in sys.argv:
-#     os.environ["ATS_WORKQUEUE_OVERRIDE"] = os.getenv("ATS_WORKQUEUE_ID_BORGER_FYLDT_22")
-
-# elif "--faglig_vurdering_udfoert" in sys.argv:
-#     os.environ["ATS_WORKQUEUE_OVERRIDE"] = os.getenv("ATS_WORKQUEUE_ID_FAGLIG_VURDERING_UDFOERT")
-
-# elif "--aftale_oprettet_i_solteq" in sys.argv:
-#     os.environ["ATS_WORKQUEUE_OVERRIDE"] = os.getenv("ATS_WORKQUEUE_ID_AFTALE_OPRETTET_I_SOLTEQ")
-
-# ### This block disables SSL verification and overrides env vars ###
 # import requests
 # import urllib3
 # urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)

@@ -1,5 +1,4 @@
 """Module to handle item processing"""
-# from mbu_rpa_core.exceptions import ProcessError, BusinessError
 
 import os
 import logging
@@ -29,9 +28,9 @@ def process_item(item_data: dict, item_reference: str):
     logger.info("Exporting data from sql table")
     bytes_data = helper_functions.export_egenbefordring_from_hub(
         connection_string=db_connection_string,
-        sheet_name=sheet_name,
         start_date=start_date,
         end_date=end_date,
+        sheet_name=sheet_name,
     )
 
     logger.info(f"Upload file to sharepoint: {file_name}")
