@@ -230,15 +230,15 @@ def process_submission(sub, connection_string, befordrings_query):
         comments.append("Ingen aktiv bevilling fundet")
 
     if validation["wrong_morgen"]:
-        comments.append("Borger har indtastet morgen, men har kun bevilget eftermiddag.")
+        comments.append("Borger har indtastet morgen, men har kun bevilget eftermiddag")
 
     if validation["wrong_efter"]:
-        comments.append("Borger har indtastet eftermiddag, men har kun bevilget morgen.")
+        comments.append("Borger har indtastet eftermiddag, men har kun bevilget morgen")
 
     if validation["distance_violation"]:
         reported, allowed = validation["distance_example"]
         comments.append(
-            f"Borger har indtastet {reported} km men har kun bevilget {allowed} km."
+            f"Borger har indtastet {reported} km men har kun bevilget {allowed} km"
         )
 
     kommentar = "; ".join(comments)

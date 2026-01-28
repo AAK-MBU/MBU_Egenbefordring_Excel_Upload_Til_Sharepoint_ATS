@@ -1,7 +1,4 @@
 """Module to handle item processing"""
-# from mbu_rpa_core.exceptions import ProcessError, BusinessError
-
-import sys
 
 import os
 import logging
@@ -35,11 +32,6 @@ def process_item(item_data: dict, item_reference: str):
         end_date=end_date,
         sheet_name=sheet_name,
     )
-
-    mburpa_sharepoint_api = Sharepoint(**config.MBURPA_SHAREPOINT_KWARGS)
-    mburpa_sharepoint_api.upload_file_from_bytes(binary_content=bytes_data, file_name=f"{file_name}.xlsx", folder_name="Egenbefordring")
-
-    sys.exit()
 
     logger.info(f"Upload file to sharepoint: {file_name}")
     sharepoint_api.upload_file_from_bytes(binary_content=bytes_data, file_name=f"{file_name}.xlsx", folder_name=config.FOLDER_NAME)
