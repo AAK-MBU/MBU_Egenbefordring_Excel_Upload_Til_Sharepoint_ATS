@@ -73,9 +73,10 @@ def export_egenbefordring_from_hub(
     befordrings_query = """
         SELECT
             CPR,
-            KortestGaaAfstand,
             BevilgetKoereAfstand,
-            TidspunktForBevilling
+            TidspunktForBevilling,
+            BevillingFra,
+            BevillingTil
         FROM
             [RPA].[rpa].[BefordringsData]
         WHERE
@@ -83,8 +84,7 @@ def export_egenbefordring_from_hub(
             AND BevillingAfKoerselstype = 'Egenbefordring'
             AND GETDATE() BETWEEN BevillingFra AND BevillingTil
         ORDER BY
-            BevilgetKoereAfstand DESC,
-            KortestGaaAfstand DESC
+            BevilgetKoereAfstand DESC
     """
 
     submissions = get_items_from_query_with_params(
@@ -152,9 +152,7 @@ def export_egenbefordring_from_hub(
     with pd.ExcelWriter(stream, engine="openpyxl") as writer:
         df.to_excel(writer, index=False, sheet_name=sheet_name)
 
-    excel_bytes = stream.getvalue()
-
-    return excel_bytes
+    return stream.getvalue()
 
 
 # --------------------------------------------------------------------
@@ -162,7 +160,10 @@ def export_egenbefordring_from_hub(
 # --------------------------------------------------------------------
 def process_submission(sub, connection_string, befordrings_query):
     """
-    Process each individual submissions and validate data
+    Process each individual submission.
+
+    Rule:
+    - Exactly ONE active egenbefordrings-bevilling is required
     """
 
     form_id = sub.get("form_id")
@@ -173,12 +174,9 @@ def process_submission(sub, connection_string, befordrings_query):
 
     barnets_cpr = data.get("cpr_barnet")
 
-    bd_rows = get_items_from_query_with_params(
-        connection_string=connection_string,
-        query=befordrings_query,
-        params=[barnets_cpr],
-    )
+    bd_rows = get_items_from_query_with_params(connection_string=connection_string, query=befordrings_query, params=[barnets_cpr])
 
+    # 0 active bevillinger
     if not bd_rows:
         return build_final_row(
             data=data,
@@ -189,45 +187,36 @@ def process_submission(sub, connection_string, befordrings_query):
             kommentar="Ingen aktiv bevilling fundet",
         )
 
-    allowed_morgen = False
-    allowed_efter = False
+    # 2+ active bevillinger
+    if len(bd_rows) > 1:
+        return build_final_row(
+            data=data,
+            form_id=form_id,
+            modtagelsesdato=modtagelsesdato,
+            submission_valid=False,
+            aendret_beloeb="",
+            kommentar="Borger har 2 aktive bevillinger til egenbefordring",
+        )
 
-    for br in bd_rows:
-        tid = (br.get("TidspunktForBevilling") or "").lower()
+    # Exactly one active bevilling
+    bevilling = bd_rows[0]
 
-        if "morgen" in tid:
-            allowed_morgen = True
+    tid = (bevilling.get("TidspunktForBevilling") or "").lower()
+    allowed_morgen = "morgen" in tid
+    allowed_efter = "eftermiddag" in tid
 
-        if "eftermiddag" in tid:
-            allowed_efter = True
-
-    allowed_distance = float(0)
-    no_bevilling_found = True
-
-    for br in bd_rows:
-        if br.get("BevilgetKoereAfstand") is not None:
-            allowed_distance = convert_value_to_float(br["BevilgetKoereAfstand"])
-            no_bevilling_found = False
-
-            break
-
-        if br.get("KortestGaaAfstand") is not None:
-            allowed_distance = convert_value_to_float(br["KortestGaaAfstand"])
-            no_bevilling_found = False
+    allowed_distance = convert_value_to_float(
+        bevilling.get("BevilgetKoereAfstand")
+    )
 
     validation = validate_entries(
         test_list=data.get("test", []),
         allowed_morgen=allowed_morgen,
         allowed_efter=allowed_efter,
-        allowed_distance=allowed_distance,
+        allowed_distance=allowed_distance or 0,
     )
 
-    submission_valid = not no_bevilling_found
     comments = []
-
-    if no_bevilling_found:
-        submission_valid = False
-        comments.append("Ingen aktiv bevilling fundet")
 
     if validation["wrong_morgen"]:
         comments.append("Borger har indtastet morgen, men har kun bevilget eftermiddag")
@@ -244,7 +233,9 @@ def process_submission(sub, connection_string, befordrings_query):
     kommentar = "; ".join(comments)
 
     aendret_beloeb = ""
-    if submission_valid and allowed_distance > 0 and comments:
+    submission_valid = True
+
+    if allowed_distance and comments:
         aendret_beloeb = round(
             validation["valid_legs"] * allowed_distance * 2.23, 2
         )
@@ -259,6 +250,9 @@ def process_submission(sub, connection_string, befordrings_query):
     )
 
 
+# --------------------------------------------------------------------
+# Validation helpers
+# --------------------------------------------------------------------
 def validate_entries(
     test_list,
     allowed_morgen,
@@ -279,7 +273,6 @@ def validate_entries(
         km_til = convert_value_to_float(entry.get("til_skole"))
         km_fra = convert_value_to_float(entry.get("til_hjem"))
 
-        # Morning leg
         is_valid, is_wrong, distance_violation, example = validate_leg(
             km=km_til,
             allowed=allowed_morgen,
@@ -289,14 +282,11 @@ def validate_entries(
 
         if is_wrong:
             wrong_morgen = True
-
         if is_valid:
             valid_legs += 1
-
         if example:
             distance_example = example
 
-        # Afternoon leg
         is_valid, is_wrong, distance_violation, example = validate_leg(
             km=km_fra,
             allowed=allowed_efter,
@@ -306,10 +296,8 @@ def validate_entries(
 
         if is_wrong:
             wrong_efter = True
-
         if is_valid:
             valid_legs += 1
-
         if example:
             distance_example = example
 
@@ -330,9 +318,6 @@ def validate_leg(
 ):
     """
     Validate a single leg (morning or afternoon).
-
-    Returns:
-        (is_valid_leg, is_wrong_time, new_distance_violation, distance_example)
     """
 
     if km is None or km <= 0:
@@ -341,17 +326,9 @@ def validate_leg(
     if not allowed:
         return False, True, distance_violation, None
 
-    # Valid leg
-    if allowed_distance <= 0:
+    if allowed_distance <= 0 or distance_violation or km <= allowed_distance:
         return True, False, distance_violation, None
 
-    if distance_violation:
-        return True, False, distance_violation, None
-
-    if km <= allowed_distance:
-        return True, False, distance_violation, None
-
-    # Distance violation
     return True, False, True, (km, allowed_distance)
 
 
@@ -367,7 +344,7 @@ def build_final_row(
     kommentar,
 ):
     """
-    Small helper to build the final row that will be appended to the sheet
+    Build the final Excel row.
     """
 
     row = dict(data)
@@ -396,7 +373,7 @@ def get_items_from_query_with_params(
     params,
 ):
     """
-    Helper function to retrieve the items from an SQL query, using params in place of hardcoded values
+    Execute parametrized SQL query and return rows as dicts.
     """
 
     try:
@@ -421,7 +398,7 @@ def get_items_from_query_with_params(
 
 def convert_value_to_float(v):
     """
-    Small helper function to safely convert a value to float
+    Safely convert value to float.
     """
 
     if v in (None, ""):
