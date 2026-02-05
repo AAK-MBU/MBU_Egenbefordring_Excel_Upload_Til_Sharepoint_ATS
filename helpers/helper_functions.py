@@ -20,6 +20,21 @@ logger = logging.getLogger(__name__)
 # Date helpers
 # --------------------------------------------------------------------
 def get_week_dates(number_of_weeks: int = None):
+    """
+    Return start and end timestamps for a week.
+
+    If number_of_weeks is provided, the calculation is offset that many
+    weeks back from the current date. Otherwise, the current week is used.
+
+    The returned range always spans from Monday 00:00:00 to Sunday 23:59:59.
+
+    Args:
+        number_of_weeks (int, optional): Number of weeks to subtract from today.
+
+    Returns:
+        tuple[datetime, datetime]: (start_of_week, end_of_week)
+    """
+
     today = (
         datetime.now() - timedelta(weeks=number_of_weeks)
         if number_of_weeks
@@ -37,10 +52,38 @@ def get_week_dates(number_of_weeks: int = None):
 # Takst helpers
 # --------------------------------------------------------------------
 def get_takst_for_date(d: date) -> float:
+    """
+    Return the applicable reimbursement rate (takst) for a given date.
+
+    The rate changes from 1 January 2026 and forward.
+
+    Args:
+        d (date): Date to evaluate.
+
+    Returns:
+        float: Takst value for the given date.
+    """
+
     return 2.28 if d >= date(2026, 1, 1) else 2.23
 
 
 def to_date(value):
+    """
+    Convert a datetime or date object to a date.
+
+    This helper ensures consistent date comparisons when values
+    may be returned as either datetime or date from the database.
+
+    Args:
+        value (datetime | date): Value to convert.
+
+    Returns:
+        date: Converted date value.
+
+    Raises:
+        TypeError: If the value is not a supported type.
+    """
+
     if isinstance(value, datetime):
         return value.date()
     if isinstance(value, date):
@@ -57,6 +100,25 @@ def export_egenbefordring_from_hub(
     end_date: str = "",
     sheet_name: str = "",
 ):
+    """
+    Export egenbefordring submissions to an Excel file.
+
+    The function:
+    - Fetches submissions from journalizing within a date range
+    - Validates each submission against active bevillinger
+    - Applies business rules for approval and adjustment
+    - Outputs a structured Excel sheet in a fixed column order
+
+    Args:
+        connection_string (str): SQL Server connection string.
+        start_date (str): Start of date filter (inclusive).
+        end_date (str): End of date filter (inclusive).
+        sheet_name (str): Name of the Excel worksheet.
+
+    Returns:
+        bytes: Binary Excel file contents.
+    """
+
     submissions_query = """
         SELECT
             form_id,
@@ -165,6 +227,27 @@ def export_egenbefordring_from_hub(
 # Submission processing
 # --------------------------------------------------------------------
 def process_submission(sub, connection_string, befordrings_query):
+    """
+    Process and validate a single egenbefordring submission.
+
+    This function performs the core business logic:
+    - Loads submission data and reported driving entries
+    - Matches each entry to active bevillinger by date
+    - Rejects overlapping or invalid bevillinger
+    - Validates school, address, time-of-day, and distance rules
+    - Calculates adjusted reimbursement when applicable
+
+    The function returns a single flattened row suitable for Excel export.
+
+    Args:
+        sub (dict): Submission row from journalizing.
+        connection_string (str): SQL Server connection string.
+        befordrings_query (str): SQL query to fetch bevilling data.
+
+    Returns:
+        dict: Processed submission row.
+    """
+
     form_id = sub.get("form_id")
     modtagelsesdato = sub.get("modtagelsesdato")
 
@@ -386,6 +469,24 @@ def process_submission(sub, connection_string, befordrings_query):
 # Bevilling helpers
 # --------------------------------------------------------------------
 def normalize_bevillinger(rows):
+    """
+    Normalize raw bevilling rows into a structured, comparable format.
+
+    Each bevilling is converted into a dictionary containing:
+    - Active date range
+    - Allowed time slots (morgen / eftermiddag)
+    - Allowed distance
+    - Approved school and address information
+
+    This normalization simplifies later per-day matching and validation.
+
+    Args:
+        rows (list[dict]): Raw database rows for bevillinger.
+
+    Returns:
+        list[dict]: Normalized bevilling dictionaries.
+    """
+
     bevillinger = []
 
     for r in rows:
@@ -410,6 +511,17 @@ def normalize_bevillinger(rows):
 
 
 def find_bevillinger_for_date(bevillinger, d):
+    """
+    Find all bevillinger that are active on a given date.
+
+    Args:
+        bevillinger (list[dict]): Normalized bevillinger.
+        d (date): Date to match.
+
+    Returns:
+        list[dict]: Bevillinger active on the given date.
+    """
+
     return [
         b for b in bevillinger
         if b["from"] <= d <= b["to"]
@@ -420,6 +532,27 @@ def find_bevillinger_for_date(bevillinger, d):
 # Validation helpers
 # --------------------------------------------------------------------
 def validate_entries(test_list, allowed_morgen, allowed_efter, allowed_distance):
+    """
+    Validate reported driving entries for a single submission date.
+
+    Each entry is checked for:
+    - Allowed morning / afternoon driving
+    - Distance violations
+    - Count of valid driving legs
+
+    The function aggregates validation flags to support both
+    hard rejections and adjustable corrections.
+
+    Args:
+        test_list (list[dict]): Driving entries for a single date.
+        allowed_morgen (bool): Whether morning driving is allowed.
+        allowed_efter (bool): Whether afternoon driving is allowed.
+        allowed_distance (float): Maximum approved distance.
+
+    Returns:
+        dict: Validation results and counters.
+    """
+
     wrong_morgen = False
     wrong_efter = False
     distance_violation = False
@@ -460,6 +593,27 @@ def validate_entries(test_list, allowed_morgen, allowed_efter, allowed_distance)
 
 
 def validate_leg(km, allowed, allowed_distance, distance_violation):
+    """
+    Validate a single driving leg.
+
+    Determines whether the leg:
+    - Is present and positive
+    - Is allowed for the given time slot
+    - Exceeds the approved distance
+
+    Distance violations are flagged but do not invalidate
+    the leg entirely, allowing for adjusted reimbursement.
+
+    Args:
+        km (float | None): Reported distance.
+        allowed (bool): Whether this leg type is allowed.
+        allowed_distance (float): Approved maximum distance.
+        distance_violation (bool): Existing violation state.
+
+    Returns:
+        tuple: (is_valid, is_wrong_time, distance_violation, example)
+    """
+
     if km is None or km <= 0:
         return False, False, distance_violation, None
 
@@ -483,6 +637,24 @@ def build_final_row(
     aendret_beloeb,
     kommentar,
 ):
+    """
+    Build the final flattened row for Excel export.
+
+    Combines original form data with system-generated fields
+    such as approval flags, adjusted amount, and comments.
+
+    Args:
+        data (dict): Original form data.
+        form_id (str): Submission UUID.
+        modtagelsesdato (str): Submission timestamp.
+        submission_valid (bool): Whether the submission is approved.
+        aendret_beloeb (float | str): Adjusted reimbursement amount.
+        kommentar (str): Processing comments.
+
+    Returns:
+        dict: Final row for Excel output.
+    """
+
     row = dict(data)
 
     row["modtagelsesdato"] = modtagelsesdato
@@ -504,6 +676,23 @@ def build_final_row(
 # DB + conversion helpers
 # --------------------------------------------------------------------
 def get_items_from_query_with_params(connection_string, query, params):
+    """
+    Execute a parameterized SQL query and return results as dictionaries.
+
+    Ensures:
+    - Safe parameter binding
+    - Automatic column-to-value mapping
+    - Consistent string cleanup
+
+    Args:
+        connection_string (str): SQL Server connection string.
+        query (str): SQL query with placeholders.
+        params (list): Parameters for the query.
+
+    Returns:
+        list[dict]: Query results.
+    """
+
     try:
         with pyodbc.connect(connection_string) as conn:
             with conn.cursor() as cursor:
@@ -525,6 +714,20 @@ def get_items_from_query_with_params(connection_string, query, params):
 
 
 def convert_value_to_float(v):
+    """
+    Safely convert a value to float.
+
+    Handles:
+    - None or empty values
+    - Comma-based decimal separators
+
+    Args:
+        v (any): Value to convert.
+
+    Returns:
+        float | None: Converted value or None if invalid.
+    """
+
     if v in (None, ""):
         return None
 
@@ -536,12 +739,22 @@ def convert_value_to_float(v):
 
 def parse_selected_school(raw_school: str):
     """
-    Splits 'Langagerskolen (Bøgeskov Høvej)' into:
-    ('Langagerskolen', 'Bøgeskov Høvej')
+    Parse a school selection that may contain a sub-address.
 
-    If no parentheses exist:
-    ('Langagerskolen', None)
+    Examples:
+        'Langagerskolen (Bøgeskov Høvej)'
+            -> ('Langagerskolen', 'Bøgeskov Høvej')
+
+        'Lystrup Skole'
+            -> ('Lystrup Skole', None)
+
+    Args:
+        raw_school (str): Selected school value.
+
+    Returns:
+        tuple[str, str | None]: (school_name, road_name)
     """
+
     if not raw_school:
         return "", None
 
@@ -556,9 +769,23 @@ def parse_selected_school(raw_school: str):
 
 def extract_road_name(address: str):
     """
-    'Bøgeskov Høvej 15, 8220 Brabrand'
-    -> 'Bøgeskov Høvej'
+    Extract the road name from a full address string.
+
+    Removes:
+    - House numbers
+    - Postal code and city
+
+    Example:
+        'Bøgeskov Høvej 15, 8220 Brabrand'
+            -> 'Bøgeskov Høvej'
+
+    Args:
+        address (str): Full address.
+
+    Returns:
+        str: Road name only.
     """
+
     if not address:
         return ""
 
@@ -574,8 +801,34 @@ def extract_road_name(address: str):
 
 # Normalize for comparison
 def norm(v):
+    """
+    Normalize a value for safe string comparison.
+
+    Converts None to empty string, lowercases the value,
+    and strips surrounding whitespace.
+
+    Args:
+        v (any): Value to normalize.
+
+    Returns:
+        str: Normalized string.
+    """
+
     return (v or "").lower().strip()
 
 
 def remove_numbers(s: str) -> str:
+    """
+    Remove all numeric characters from a string.
+
+    Primarily used to compare addresses while ignoring
+    house numbers and floor indicators.
+
+    Args:
+        s (str): Input string.
+
+    Returns:
+        str: String without digits.
+    """
+
     return re.sub(r"\d+", "", s or "").strip()
