@@ -33,5 +33,11 @@ def process_item(item_data: dict, item_reference: str):
         sheet_name=sheet_name,
     )
 
-    logger.info(f"Upload file to sharepoint: {file_name}")
-    sharepoint_api.upload_file_from_bytes(binary_content=bytes_data, file_name=f"{file_name}.xlsx", folder_name=config.FOLDER_NAME)
+    mburpa_sharepoint_api = Sharepoint(**config.MBURPA_SHAREPOINT_KWARGS)
+    mburpa_sharepoint_api.upload_file_from_bytes(binary_content=bytes_data, file_name=f"{file_name}.xlsx", folder_name=config.MBURPA_FOLDER_NAME)
+
+    import sys
+    sys.exit()
+
+    # logger.info(f"Upload file to sharepoint: {file_name}")
+    # sharepoint_api.upload_file_from_bytes(binary_content=bytes_data, file_name=f"{file_name}.xlsx", folder_name=config.FOLDER_NAME)
