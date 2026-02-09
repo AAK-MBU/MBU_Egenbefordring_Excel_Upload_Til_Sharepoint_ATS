@@ -4,7 +4,10 @@ Helper functions
 
 import json
 import logging
-from datetime import datetime, timedelta
+
+import re
+
+from datetime import datetime, timedelta, date
 from io import BytesIO
 
 import pandas as pd
@@ -18,9 +21,18 @@ logger = logging.getLogger(__name__)
 # --------------------------------------------------------------------
 def get_week_dates(number_of_weeks: int = None):
     """
-    Returns the start and end dates of the current week.
+    Return start and end timestamps for a week.
 
-    The week starts Monday 00:00:00 and ends Sunday 23:59:59.
+    If number_of_weeks is provided, the calculation is offset that many
+    weeks back from the current date. Otherwise, the current week is used.
+
+    The returned range always spans from Monday 00:00:00 to Sunday 23:59:59.
+
+    Args:
+        number_of_weeks (int, optional): Number of weeks to subtract from today.
+
+    Returns:
+        tuple[datetime, datetime]: (start_of_week, end_of_week)
     """
 
     today = (
@@ -37,6 +49,49 @@ def get_week_dates(number_of_weeks: int = None):
 
 
 # --------------------------------------------------------------------
+# Takst helpers
+# --------------------------------------------------------------------
+def get_takst_for_date(d: date) -> float:
+    """
+    Return the applicable reimbursement rate (takst) for a given date.
+
+    The rate changes from 1 January 2026 and forward.
+
+    Args:
+        d (date): Date to evaluate.
+
+    Returns:
+        float: Takst value for the given date.
+    """
+
+    return 2.28 if d >= date(2026, 1, 1) else 2.23
+
+
+def to_date(value):
+    """
+    Convert a datetime or date object to a date.
+
+    This helper ensures consistent date comparisons when values
+    may be returned as either datetime or date from the database.
+
+    Args:
+        value (datetime | date): Value to convert.
+
+    Returns:
+        date: Converted date value.
+
+    Raises:
+        TypeError: If the value is not a supported type.
+    """
+
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    raise TypeError(f"Unsupported date type: {type(value)}")
+
+
+# --------------------------------------------------------------------
 # Core export
 # --------------------------------------------------------------------
 def export_egenbefordring_from_hub(
@@ -46,8 +101,22 @@ def export_egenbefordring_from_hub(
     sheet_name: str = "",
 ):
     """
-    Retrieves Egenbefordring submissions, validates morning/afternoon and distance,
-    recalculates payout when needed, and exports a fully structured Excel sheet.
+    Export egenbefordring submissions to an Excel file.
+
+    The function:
+    - Fetches submissions from journalizing within a date range
+    - Validates each submission against active bevillinger
+    - Applies business rules for approval and adjustment
+    - Outputs a structured Excel sheet in a fixed column order
+
+    Args:
+        connection_string (str): SQL Server connection string.
+        start_date (str): Start of date filter (inclusive).
+        end_date (str): End of date filter (inclusive).
+        sheet_name (str): Name of the Excel worksheet.
+
+    Returns:
+        bytes: Binary Excel file contents.
     """
 
     submissions_query = """
@@ -75,6 +144,9 @@ def export_egenbefordring_from_hub(
             CPR,
             BevilgetKoereAfstand,
             TidspunktForBevilling,
+            ElevensAdresse,
+            SkoleNavnBefordring,
+            SkolensAdresse,
             BevillingFra,
             BevillingTil
         FROM
@@ -82,9 +154,8 @@ def export_egenbefordring_from_hub(
         WHERE
             CPR = ?
             AND BevillingAfKoerselstype = 'Egenbefordring'
-            AND GETDATE() BETWEEN BevillingFra AND BevillingTil
         ORDER BY
-            BevilgetKoereAfstand DESC
+            BevillingFra
     """
 
     submissions = get_items_from_query_with_params(
@@ -93,18 +164,16 @@ def export_egenbefordring_from_hub(
         [start_date, end_date, start_date, end_date],
     )
 
-    logger.info(f"Loaded {len(submissions)} submissions")
-
     final_rows = []
 
     for sub in submissions:
-        row = process_submission(
-            sub=sub,
-            connection_string=connection_string,
-            befordrings_query=befordrings_query,
+        final_rows.append(
+            process_submission(
+                sub=sub,
+                connection_string=connection_string,
+                befordrings_query=befordrings_query,
+            )
         )
-
-        final_rows.append(row)
 
     df = pd.DataFrame(final_rows).where(pd.notnull, "")
 
@@ -148,7 +217,6 @@ def export_egenbefordring_from_hub(
     df = df[desired_order]
 
     stream = BytesIO()
-
     with pd.ExcelWriter(stream, engine="openpyxl") as writer:
         df.to_excel(writer, index=False, sheet_name=sheet_name)
 
@@ -160,10 +228,24 @@ def export_egenbefordring_from_hub(
 # --------------------------------------------------------------------
 def process_submission(sub, connection_string, befordrings_query):
     """
-    Process each individual submission.
+    Process and validate a single egenbefordring submission.
 
-    Rule:
-    - Exactly ONE active egenbefordrings-bevilling is required
+    This function performs the core business logic:
+    - Loads submission data and reported driving entries
+    - Matches each entry to active bevillinger by date
+    - Rejects overlapping or invalid bevillinger
+    - Validates school, address, time-of-day, and distance rules
+    - Calculates adjusted reimbursement when applicable
+
+    The function returns a single flattened row suitable for Excel export.
+
+    Args:
+        sub (dict): Submission row from journalizing.
+        connection_string (str): SQL Server connection string.
+        befordrings_query (str): SQL query to fetch bevilling data.
+
+    Returns:
+        dict: Processed submission row.
     """
 
     form_id = sub.get("form_id")
@@ -173,10 +255,22 @@ def process_submission(sub, connection_string, befordrings_query):
     data = form_data.get("data", {})
 
     barnets_cpr = data.get("cpr_barnet")
+    koerselsliste = data.get("test", [])
 
-    bd_rows = get_items_from_query_with_params(connection_string=connection_string, query=befordrings_query, params=[barnets_cpr])
+    # elevens_adresse = str(data.get("adresse1")) or ""
+    elevens_adresse = str(norm(data.get("adresse1"))).split(",", 1)[0].strip().replace(" ", "")
 
-    # 0 active bevillinger
+    valgt_skole = data.get("skoleliste") or ""
+    indtastet_skole = data.get("skriv_dit_barns_skole_eller_dagtilbud") or ""
+
+    barnets_skole = valgt_skole.strip() or indtastet_skole.strip()
+
+    bd_rows = get_items_from_query_with_params(
+        connection_string=connection_string,
+        query=befordrings_query,
+        params=[barnets_cpr],
+    )
+
     if not bd_rows:
         return build_final_row(
             data=data,
@@ -187,58 +281,179 @@ def process_submission(sub, connection_string, befordrings_query):
             kommentar="Ingen aktiv bevilling fundet",
         )
 
-    # 2+ active bevillinger
-    if len(bd_rows) > 1:
+    bevillinger = normalize_bevillinger(bd_rows)
+
+    total_valid_legs = 0
+    total_beloeb = 0.0
+
+    found_any_valid_bevilling = False
+    overlapping_bevilling_found = False
+
+    wrong_morgen = False
+    wrong_efter = False
+    distance_violation = False
+    distance_example = None
+    out_of_bevilling_dates = False
+
+    for entry in koerselsliste:
+        entry_date = datetime.fromisoformat(entry["dato"]).date()
+
+        matches = find_bevillinger_for_date(bevillinger, entry_date)
+
+        if not matches:
+            out_of_bevilling_dates = True
+            continue
+
+        if len(matches) > 1:
+            overlapping_bevilling_found = True
+            break  # 🚫 immediate hard stop
+
+        found_any_valid_bevilling = True
+        bevilling = matches[0]
+
+        # adresse_paa_fundet_bevilling = str(bevilling.get("bevilget_addresse")).split(",", 1)[0].strip()
+        adresse_paa_fundet_bevilling = str(norm(bevilling.get("bevilget_addresse"))).split(",", 1)[0].strip().replace(" ", "")
+
+        # --- School comparison (supports split schools) ---
+        submission_school_name, submission_school_road = parse_selected_school(
+            barnets_skole
+        )
+
+        bevilling_school_name = str(bevilling.get("bevilget_skole") or "")
+        bevilling_school_address = str(bevilling.get("skolens_adresse") or "")
+        bevilling_road = extract_road_name(bevilling_school_address)
+
+        if bevilling_school_name in (None, "", 0):
+            return build_final_row(
+                data=data,
+                form_id=form_id,
+                modtagelsesdato=modtagelsesdato,
+                submission_valid=False,
+                aendret_beloeb="",
+                kommentar="Barnets skole forekommer ikke af bevilling",
+            )
+
+        if adresse_paa_fundet_bevilling in (None, "", 0):
+            return build_final_row(
+                data=data,
+                form_id=form_id,
+                modtagelsesdato=modtagelsesdato,
+                submission_valid=False,
+                aendret_beloeb="",
+                kommentar="Barnets adresse forekommer ikke af bevilling",
+            )
+
+        if norm(submission_school_name) != norm(bevilling_school_name):
+            return build_final_row(
+                data=data,
+                form_id=form_id,
+                modtagelsesdato=modtagelsesdato,
+                submission_valid=False,
+                aendret_beloeb="",
+                kommentar="Indberettet skole matcher ikke barnets bevilling",
+            )
+
+        # Only check road if submission specified one
+        if submission_school_road:
+            if norm(submission_school_road) != norm(bevilling_road):
+                return build_final_row(
+                    data=data,
+                    form_id=form_id,
+                    modtagelsesdato=modtagelsesdato,
+                    submission_valid=False,
+                    aendret_beloeb="",
+                    kommentar="Indberettet skoleadresse matcher ikke barnets bevilling",
+                )
+
+        if remove_numbers(elevens_adresse) != remove_numbers(adresse_paa_fundet_bevilling):
+            return build_final_row(
+                data=data,
+                form_id=form_id,
+                modtagelsesdato=modtagelsesdato,
+                submission_valid=False,
+                aendret_beloeb="",
+                kommentar="Indberettet adresse matcher ikke barnets bevilling",
+            )
+
+        validation = validate_entries(
+            test_list=[entry],
+            allowed_morgen=bevilling["allowed_morgen"],
+            allowed_efter=bevilling["allowed_efter"],
+            allowed_distance=bevilling["allowed_distance"],
+        )
+
+        if validation["wrong_morgen"]:
+            wrong_morgen = True
+        if validation["wrong_efter"]:
+            wrong_efter = True
+        if validation["distance_violation"]:
+            distance_violation = True
+            distance_example = validation["distance_example"]
+
+        valid_legs = validation["valid_legs"]
+        total_valid_legs += valid_legs
+
+        if valid_legs:
+            takst = get_takst_for_date(entry_date)
+            total_beloeb += valid_legs * bevilling["allowed_distance"] * takst
+
+    comments = []
+
+    # 🚫 Hard rejection cases
+    if overlapping_bevilling_found:
+        comments.append(
+            "Borger har flere aktive egenbefordrings-bevillinger på samme dato"
+        )
         return build_final_row(
             data=data,
             form_id=form_id,
             modtagelsesdato=modtagelsesdato,
             submission_valid=False,
             aendret_beloeb="",
-            kommentar="Borger har 2 aktive bevillinger til egenbefordring",
+            kommentar="; ".join(comments),
         )
 
-    # Exactly one active bevilling
-    bevilling = bd_rows[0]
+    if not found_any_valid_bevilling:
+        comments.append(
+            "Indberettet kørsel ligger udenfor aktiv bevilling"
+        )
+        return build_final_row(
+            data=data,
+            form_id=form_id,
+            modtagelsesdato=modtagelsesdato,
+            submission_valid=False,
+            aendret_beloeb="",
+            kommentar="; ".join(comments),
+        )
 
-    tid = (bevilling.get("TidspunktForBevilling") or "").lower()
-    allowed_morgen = "morgen" in tid
-    allowed_efter = "eftermiddag" in tid
+    # ⚠️ Adjustable errors
+    if wrong_morgen:
+        comments.append(
+            "Borger har indtastet morgen, men har kun bevilget eftermiddag"
+        )
 
-    allowed_distance = convert_value_to_float(
-        bevilling.get("BevilgetKoereAfstand")
-    )
+    if wrong_efter:
+        comments.append(
+            "Borger har indtastet eftermiddag, men har kun bevilget morgen"
+        )
 
-    validation = validate_entries(
-        test_list=data.get("test", []),
-        allowed_morgen=allowed_morgen,
-        allowed_efter=allowed_efter,
-        allowed_distance=allowed_distance or 0,
-    )
-
-    comments = []
-
-    if validation["wrong_morgen"]:
-        comments.append("Borger har indtastet morgen, men har kun bevilget eftermiddag")
-
-    if validation["wrong_efter"]:
-        comments.append("Borger har indtastet eftermiddag, men har kun bevilget morgen")
-
-    if validation["distance_violation"]:
-        reported, allowed = validation["distance_example"]
+    if distance_violation and distance_example:
+        reported, allowed = distance_example
         comments.append(
             f"Borger har indtastet {reported} km men har kun bevilget {allowed} km"
         )
 
-    kommentar = "; ".join(comments)
-
-    aendret_beloeb = ""
-    submission_valid = True
-
-    if allowed_distance and comments:
-        aendret_beloeb = round(
-            validation["valid_legs"] * allowed_distance * 2.23, 2
+    if out_of_bevilling_dates:
+        comments.append(
+            "Borger har indtastet kørsel på datoer uden for aktive bevillinger"
         )
+
+    submission_valid = total_valid_legs > 0
+
+    if submission_valid and comments:
+        aendret_beloeb = round(total_beloeb, 2)
+    else:
+        aendret_beloeb = ""
 
     return build_final_row(
         data=data,
@@ -246,21 +461,96 @@ def process_submission(sub, connection_string, befordrings_query):
         modtagelsesdato=modtagelsesdato,
         submission_valid=submission_valid,
         aendret_beloeb=aendret_beloeb,
-        kommentar=kommentar,
+        kommentar="; ".join(comments),
     )
+
+
+# --------------------------------------------------------------------
+# Bevilling helpers
+# --------------------------------------------------------------------
+def normalize_bevillinger(rows):
+    """
+    Normalize raw bevilling rows into a structured, comparable format.
+
+    Each bevilling is converted into a dictionary containing:
+    - Active date range
+    - Allowed time slots (morgen / eftermiddag)
+    - Allowed distance
+    - Approved school and address information
+
+    This normalization simplifies later per-day matching and validation.
+
+    Args:
+        rows (list[dict]): Raw database rows for bevillinger.
+
+    Returns:
+        list[dict]: Normalized bevilling dictionaries.
+    """
+
+    bevillinger = []
+
+    for r in rows:
+        tid = (r.get("TidspunktForBevilling") or "").lower()
+
+        bevillinger.append(
+            {
+                "from": to_date(r["BevillingFra"]),
+                "to": to_date(r["BevillingTil"]),
+                "allowed_morgen": "morgen" in tid,
+                "allowed_efter": "eftermiddag" in tid,
+                "allowed_distance": convert_value_to_float(
+                    r.get("BevilgetKoereAfstand")
+                ) or 0,
+                "bevilget_skole": r.get("SkoleNavnBefordring"),
+                "skolens_adresse": r.get("SkolensAdresse"),
+                "bevilget_addresse": r.get("ElevensAdresse"),
+            }
+        )
+
+    return bevillinger
+
+
+def find_bevillinger_for_date(bevillinger, d):
+    """
+    Find all bevillinger that are active on a given date.
+
+    Args:
+        bevillinger (list[dict]): Normalized bevillinger.
+        d (date): Date to match.
+
+    Returns:
+        list[dict]: Bevillinger active on the given date.
+    """
+
+    return [
+        b for b in bevillinger
+        if b["from"] <= d <= b["to"]
+    ]
 
 
 # --------------------------------------------------------------------
 # Validation helpers
 # --------------------------------------------------------------------
-def validate_entries(
-    test_list,
-    allowed_morgen,
-    allowed_efter,
-    allowed_distance,
-):
+def validate_entries(test_list, allowed_morgen, allowed_efter, allowed_distance):
     """
-    Helper function to validate the citizens driving entries.
+    Validate reported driving entries for a single submission date.
+
+    Each entry is checked for:
+    - Allowed morning / afternoon driving
+    - Distance violations
+    - Count of valid driving legs
+
+    The function aggregates validation flags to support both
+    hard rejections and adjustable corrections.
+
+    Args:
+        test_list (list[dict]): Driving entries for a single date.
+        allowed_morgen (bool): Whether morning driving is allowed.
+        allowed_efter (bool): Whether afternoon driving is allowed.
+        allowed_distance (float): Maximum approved distance.
+
+    Returns:
+        dict: Validation results and counters.
     """
 
     wrong_morgen = False
@@ -274,12 +564,8 @@ def validate_entries(
         km_fra = convert_value_to_float(entry.get("til_hjem"))
 
         is_valid, is_wrong, distance_violation, example = validate_leg(
-            km=km_til,
-            allowed=allowed_morgen,
-            allowed_distance=allowed_distance,
-            distance_violation=distance_violation,
+            km_til, allowed_morgen, allowed_distance, distance_violation
         )
-
         if is_wrong:
             wrong_morgen = True
         if is_valid:
@@ -288,12 +574,8 @@ def validate_entries(
             distance_example = example
 
         is_valid, is_wrong, distance_violation, example = validate_leg(
-            km=km_fra,
-            allowed=allowed_efter,
-            allowed_distance=allowed_distance,
-            distance_violation=distance_violation,
+            km_fra, allowed_efter, allowed_distance, distance_violation
         )
-
         if is_wrong:
             wrong_efter = True
         if is_valid:
@@ -310,14 +592,26 @@ def validate_entries(
     }
 
 
-def validate_leg(
-    km,
-    allowed,
-    allowed_distance,
-    distance_violation,
-):
+def validate_leg(km, allowed, allowed_distance, distance_violation):
     """
-    Validate a single leg (morning or afternoon).
+    Validate a single driving leg.
+
+    Determines whether the leg:
+    - Is present and positive
+    - Is allowed for the given time slot
+    - Exceeds the approved distance
+
+    Distance violations are flagged but do not invalidate
+    the leg entirely, allowing for adjusted reimbursement.
+
+    Args:
+        km (float | None): Reported distance.
+        allowed (bool): Whether this leg type is allowed.
+        allowed_distance (float): Approved maximum distance.
+        distance_violation (bool): Existing violation state.
+
+    Returns:
+        tuple: (is_valid, is_wrong_time, distance_violation, example)
     """
 
     if km is None or km <= 0:
@@ -333,7 +627,7 @@ def validate_leg(
 
 
 # --------------------------------------------------------------------
-# Row / output helpers
+# Row helpers
 # --------------------------------------------------------------------
 def build_final_row(
     data,
@@ -344,7 +638,21 @@ def build_final_row(
     kommentar,
 ):
     """
-    Build the final Excel row.
+    Build the final flattened row for Excel export.
+
+    Combines original form data with system-generated fields
+    such as approval flags, adjusted amount, and comments.
+
+    Args:
+        data (dict): Original form data.
+        form_id (str): Submission UUID.
+        modtagelsesdato (str): Submission timestamp.
+        submission_valid (bool): Whether the submission is approved.
+        aendret_beloeb (float | str): Adjusted reimbursement amount.
+        kommentar (str): Processing comments.
+
+    Returns:
+        dict: Final row for Excel output.
     """
 
     row = dict(data)
@@ -367,13 +675,22 @@ def build_final_row(
 # --------------------------------------------------------------------
 # DB + conversion helpers
 # --------------------------------------------------------------------
-def get_items_from_query_with_params(
-    connection_string,
-    query,
-    params,
-):
+def get_items_from_query_with_params(connection_string, query, params):
     """
-    Execute parametrized SQL query and return rows as dicts.
+    Execute a parameterized SQL query and return results as dictionaries.
+
+    Ensures:
+    - Safe parameter binding
+    - Automatic column-to-value mapping
+    - Consistent string cleanup
+
+    Args:
+        connection_string (str): SQL Server connection string.
+        query (str): SQL query with placeholders.
+        params (list): Parameters for the query.
+
+    Returns:
+        list[dict]: Query results.
     """
 
     try:
@@ -398,7 +715,17 @@ def get_items_from_query_with_params(
 
 def convert_value_to_float(v):
     """
-    Safely convert value to float.
+    Safely convert a value to float.
+
+    Handles:
+    - None or empty values
+    - Comma-based decimal separators
+
+    Args:
+        v (any): Value to convert.
+
+    Returns:
+        float | None: Converted value or None if invalid.
     """
 
     if v in (None, ""):
@@ -406,6 +733,102 @@ def convert_value_to_float(v):
 
     try:
         return float(str(v).replace(",", "."))
-
     except Exception:
         return None
+
+
+def parse_selected_school(raw_school: str):
+    """
+    Parse a school selection that may contain a sub-address.
+
+    Examples:
+        'Langagerskolen (Bøgeskov Høvej)'
+            -> ('Langagerskolen', 'Bøgeskov Høvej')
+
+        'Lystrup Skole'
+            -> ('Lystrup Skole', None)
+
+    Args:
+        raw_school (str): Selected school value.
+
+    Returns:
+        tuple[str, str | None]: (school_name, road_name)
+    """
+
+    if not raw_school:
+        return "", None
+
+    raw_school = raw_school.strip()
+
+    if "(" in raw_school and raw_school.endswith(")"):
+        name, road = raw_school.rsplit("(", 1)
+        return name.strip(), road[:-1].strip()
+
+    return raw_school, None
+
+
+def extract_road_name(address: str):
+    """
+    Extract the road name from a full address string.
+
+    Removes:
+    - House numbers
+    - Postal code and city
+
+    Example:
+        'Bøgeskov Høvej 15, 8220 Brabrand'
+            -> 'Bøgeskov Høvej'
+
+    Args:
+        address (str): Full address.
+
+    Returns:
+        str: Road name only.
+    """
+
+    if not address:
+        return ""
+
+    # Take first part before comma
+    road_part = address.split(",")[0]
+
+    # Remove trailing house number(s)
+    return "".join(
+        c for c in road_part
+        if not c.isdigit()
+    ).strip()
+
+
+# Normalize for comparison
+def norm(v):
+    """
+    Normalize a value for safe string comparison.
+
+    Converts None to empty string, lowercases the value,
+    and strips surrounding whitespace.
+
+    Args:
+        v (any): Value to normalize.
+
+    Returns:
+        str: Normalized string.
+    """
+
+    return (v or "").lower().strip()
+
+
+def remove_numbers(s: str) -> str:
+    """
+    Remove all numeric characters from a string.
+
+    Primarily used to compare addresses while ignoring
+    house numbers and floor indicators.
+
+    Args:
+        s (str): Input string.
+
+    Returns:
+        str: String without digits.
+    """
+
+    return re.sub(r"\d+", "", s or "").strip()
