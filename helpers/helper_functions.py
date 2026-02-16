@@ -257,8 +257,7 @@ def process_submission(sub, connection_string, befordrings_query):
     barnets_cpr = data.get("cpr_barnet")
     koerselsliste = data.get("test", [])
 
-    # elevens_adresse = str(data.get("adresse1")) or ""
-    elevens_adresse = str(norm(data.get("adresse1"))).split(",", 1)[0].strip().replace(" ", "")
+    elevens_adresse = str(norm(data.get("adresse1"))).split(",", 1)[0].strip().replace(" ", "").lower().replace("å", "aa").replace("ø", "oe").replace("æ", "ae")
 
     valgt_skole = data.get("skoleliste") or ""
     indtastet_skole = data.get("skriv_dit_barns_skole_eller_dagtilbud") or ""
@@ -311,8 +310,7 @@ def process_submission(sub, connection_string, befordrings_query):
         found_any_valid_bevilling = True
         bevilling = matches[0]
 
-        # adresse_paa_fundet_bevilling = str(bevilling.get("bevilget_addresse")).split(",", 1)[0].strip()
-        adresse_paa_fundet_bevilling = str(norm(bevilling.get("bevilget_addresse"))).split(",", 1)[0].strip().replace(" ", "")
+        adresse_paa_fundet_bevilling = str(norm(bevilling.get("bevilget_addresse"))).split(",", 1)[0].strip().replace(" ", "").lower().replace("å", "aa").replace("ø", "oe").replace("æ", "ae")
 
         # --- School comparison (supports split schools) ---
         submission_school_name, submission_school_road = parse_selected_school(
