@@ -313,13 +313,11 @@ def process_submission(sub, connection_string, befordrings_query):
         adresse_paa_fundet_bevilling = str(norm(bevilling.get("bevilget_addresse"))).split(",", 1)[0].strip().replace(" ", "").lower().replace("å", "aa").replace("ø", "oe").replace("æ", "ae")
 
         # --- School comparison (supports split schools) ---
-        submission_school_name, submission_school_road = parse_selected_school(
+        submission_school_name = parse_selected_school(
             barnets_skole
         )
 
         bevilling_school_name = str(bevilling.get("bevilget_skole") or "")
-        bevilling_school_address = str(bevilling.get("skolens_adresse") or "")
-        bevilling_road = extract_road_name(bevilling_school_address)
 
         if bevilling_school_name in (None, "", 0):
             return build_final_row(
@@ -350,18 +348,6 @@ def process_submission(sub, connection_string, befordrings_query):
                 aendret_beloeb="",
                 kommentar="Indberettet skole matcher ikke barnets bevilling",
             )
-
-        # Only check road if submission specified one
-        if submission_school_road:
-            if norm(submission_school_road) != norm(bevilling_road):
-                return build_final_row(
-                    data=data,
-                    form_id=form_id,
-                    modtagelsesdato=modtagelsesdato,
-                    submission_valid=False,
-                    aendret_beloeb="",
-                    kommentar="Indberettet skoleadresse matcher ikke barnets bevilling",
-                )
 
         if remove_numbers(elevens_adresse) != remove_numbers(adresse_paa_fundet_bevilling):
             return build_final_row(
@@ -750,19 +736,19 @@ def parse_selected_school(raw_school: str):
         raw_school (str): Selected school value.
 
     Returns:
-        tuple[str, str | None]: (school_name, road_name)
+        str
     """
 
     if not raw_school:
-        return "", None
+        return ""
 
     raw_school = raw_school.strip()
 
     if "(" in raw_school and raw_school.endswith(")"):
         name, road = raw_school.rsplit("(", 1)
-        return name.strip(), road[:-1].strip()
+        return name.strip()
 
-    return raw_school, None
+    return raw_school
 
 
 def extract_road_name(address: str):
