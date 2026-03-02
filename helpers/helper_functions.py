@@ -339,7 +339,7 @@ def process_submission(sub, connection_string, befordrings_query):
                 kommentar="Barnets adresse forekommer ikke af bevilling",
             )
 
-        if norm(submission_school_name) != norm(bevilling_school_name):
+        if norm(submission_school_name) not in norm(bevilling_school_name):
             return build_final_row(
                 data=data,
                 form_id=form_id,
