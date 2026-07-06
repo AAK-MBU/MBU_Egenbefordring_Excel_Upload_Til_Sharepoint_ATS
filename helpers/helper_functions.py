@@ -137,6 +137,7 @@ def export_egenbefordring_from_hub(
                 TRY_CAST(JSON_VALUE(form_data, '$.entity.completed[0].value') AS DATETIMEOFFSET) BETWEEN ? AND ?
             )
             AND form_type = 'egenbefordring_ifm_til_skolekoer'
+            AND status = 'New'
     """
 
     befordrings_query = """
