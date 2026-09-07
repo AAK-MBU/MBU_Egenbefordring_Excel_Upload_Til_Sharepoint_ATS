@@ -99,12 +99,21 @@ def to_date(value):
 # fields suffixed _manuelt are typed by hand when no prefill is available
 # (for example when the child is not registered under the logged-in parent).
 #
-# Both variants are kept as separate columns in the Excel output so personnel
-# can see which source a value came from; this map exists so the *validation*
-# reads one value per logical field. MitID is the verified source and wins
-# when both are filled in.
+# The variants are collapsed back into a single value before export, so the
+# sheet keeps one column per value rather than one per source. The candidate
+# list is ordered most to least trustworthy: MitID is the verified source and
+# wins, a hand-typed value comes next, and anything after that is a last
+# resort used only when the earlier sources are empty.
+#
+# Each key is both the logical field name used by the validation and the
+# column name in the Excel output, so the two can never drift apart.
 FIELD_SOURCES = {
-    "barnets_cpr": ["cpr_nummer_barn_mitid", "cpr_nummer_barn_manuelt"],
+    "barnets_navn": ["barnets_navn_mitid", "barnets_navn_manuelt"],
+    "cpr_nummer_barn": [
+        "cpr_nummer_barn_mitid",
+        "cpr_nummer_barn_manuelt",
+        "vaelg_barn",
+    ],
     "barnets_adresse": ["barnets_adresse_mitid", "barnets_adresse_manuelt"],
 }
 
@@ -224,35 +233,27 @@ def export_egenbefordring_from_hub(
     df = pd.DataFrame(final_rows).where(pd.notnull, "")
 
     desired_order = [
-        "barnets_adresse_manuelt",
-        "barnets_adresse_mitid",
-        "antal_dage",
-        "total_km_beregnet",
-        "barnets_navn_manuelt",
-        "barnets_navn_mitid",
-        "beloeb_i_alt",
-        "cpr_nummer_barn_manuelt",
-        "cpr_nummer_barn_mitid",
-        "cpr_beloebsmodtager_mitid",
-        "cpr_anden_beloebsmodtager_manuelt",
-        "jeg_erklaerer_paa_tro_og_love_at_de_oplysninger_jeg_har_givet_er",
-        "jeg_er_indforstaaet_med_at_aarhus_kommune_behandler_angivne_oply",
-        "kilometer_i_alt_fra_skole",
-        "kilometer_i_alt_til_skole",
-        "barn_distance_til_skole_api",
+        "barnets_navn",
+        "cpr_nummer_barn",
+        "barnets_adresse",
         "kunne_du_ikke_finde_skole_eller_dagtilbud_paa_listen_",
-        "anden_beloebsmodtager_navn_manuelt",
-        "beloebsmodtager_navn_mitid",
         "skoleliste",
         "skriv_dit_barns_skole_eller_dagtilbud",
-        "takst",
-        "computed_twig_tjek_for_ugenummer",
-        "modtagelsesdato",
+        "barn_distance_til_skole_api",
+        "beloebsmodtager_navn_mitid",
+        "cpr_beloebsmodtager_mitid",
+        "anden_beloebsmodtager_navn_manuelt",
+        "cpr_anden_beloebsmodtager_manuelt",
+        "total_km_beregnet",
+        "beloeb_i_alt",
         "aendret_beloeb_i_alt",
+        "modtagelsesdato",
         "godkendt",
         "godkendt_af",
         "behandlet_ok",
         "behandlet_fejl",
+        "jeg_erklaerer_paa_tro_og_love_at_de_oplysninger_jeg_har_givet_er",
+        "jeg_er_indforstaaet_med_at_aarhus_kommune_behandler_angivne_oply",
         "evt_kommentar",
         "koerselsliste",
         "attachments",
@@ -303,7 +304,7 @@ def process_submission(sub, connection_string, befordrings_query):
     form_data = json.loads(sub.get("form_data"))
     data = form_data.get("data", {})
 
-    barnets_cpr = get_form_field(data, "barnets_cpr")
+    barnets_cpr = get_form_field(data, "cpr_nummer_barn")
     koerselsliste = data.get("koerselsliste", [])
 
     # Distance looked up automatically for the child; each entry may override it.
@@ -355,9 +356,20 @@ def process_submission(sub, connection_string, befordrings_query):
     distance_violation = False
     distance_example = None
     out_of_bevilling_dates = False
+    entries_without_date = False
 
     for entry in koerselsliste:
-        entry_date = datetime.fromisoformat(entry["dato"]).date()
+        entry_date = parse_entry_date(entry.get("dato"))
+
+        if entry_date is None:
+            # A blank repeat row carries no date and nothing to pay out. Only
+            # worth reporting when the citizen actually ticked a leg on it,
+            # since that is driving we cannot match to a bevilling.
+            if is_checked(entry.get("til_skole")) or is_checked(
+                entry.get("til_hjem")
+            ):
+                entries_without_date = True
+            continue
 
         matches = find_bevillinger_for_date(bevillinger, entry_date)
 
@@ -461,9 +473,14 @@ def process_submission(sub, connection_string, befordrings_query):
         )
 
     if not found_any_valid_bevilling:
-        comments.append(
-            "Indberettet kørsel ligger udenfor aktiv bevilling"
-        )
+        if entries_without_date and not out_of_bevilling_dates:
+            comments.append(
+                "Indberetningen indeholder ingen gyldige kørselsdatoer"
+            )
+        else:
+            comments.append(
+                "Indberettet kørsel ligger udenfor aktiv bevilling"
+            )
         return build_final_row(
             data=data,
             form_id=form_id,
@@ -495,10 +512,17 @@ def process_submission(sub, connection_string, befordrings_query):
             "Borger har indtastet kørsel på datoer uden for aktive bevillinger"
         )
 
+    if entries_without_date:
+        comments.append(
+            "Borger har indtastet kørsel uden dato"
+        )
+
     submission_valid = total_valid_legs > 0
 
+    beloeb = round(total_beloeb, 2)
+
     if submission_valid and comments:
-        aendret_beloeb = round(total_beloeb, 2)
+        aendret_beloeb = beloeb
     else:
         aendret_beloeb = ""
 
@@ -509,6 +533,7 @@ def process_submission(sub, connection_string, befordrings_query):
         submission_valid=submission_valid,
         aendret_beloeb=aendret_beloeb,
         kommentar="; ".join(comments),
+        beloeb=beloeb,
     )
 
 
@@ -578,6 +603,30 @@ def find_bevillinger_for_date(bevillinger, d):
 # --------------------------------------------------------------------
 # Validation helpers
 # --------------------------------------------------------------------
+def parse_entry_date(value):
+    """
+    Parse the date of a single koerselsliste entry.
+
+    The form can submit rows with an empty or malformed date, for example
+    a repeat row the citizen left blank. Those must not abort the whole
+    export, so an unusable value yields None for the caller to handle.
+
+    Args:
+        value (any): Raw "dato" value from the entry.
+
+    Returns:
+        date | None: Parsed date, or None if the value is unusable.
+    """
+
+    if value in (None, ""):
+        return None
+
+    try:
+        return datetime.fromisoformat(str(value)).date()
+    except ValueError:
+        return None
+
+
 def is_checked(value) -> bool:
     """
     Determine whether a checkbox-style form value is ticked.
@@ -746,12 +795,18 @@ def build_final_row(
     submission_valid,
     aendret_beloeb,
     kommentar,
+    beloeb=0.0,
 ):
     """
     Build the final flattened row for Excel export.
 
     Combines original form data with system-generated fields
-    such as approval flags, adjusted amount, and comments.
+    such as approval flags, calculated amount, and comments.
+
+    The form no longer shows the citizen a predicted amount, so
+    beloeb_i_alt is calculated here for every submission. It defaults to
+    0.0 because a rejected submission pays out nothing, which also keeps
+    any future rejection path from accidentally reporting an amount.
 
     Args:
         data (dict): Original form data.
@@ -760,6 +815,7 @@ def build_final_row(
         submission_valid (bool): Whether the submission is approved.
         aendret_beloeb (float | str): Adjusted reimbursement amount.
         kommentar (str): Processing comments.
+        beloeb (float): Calculated reimbursement amount.
 
     Returns:
         dict: Final row for Excel output.
@@ -767,8 +823,13 @@ def build_final_row(
 
     row = dict(data)
 
+    # Collapse each split-source field into the single column it maps to.
+    for column in FIELD_SOURCES:
+        row[column] = get_form_field(data, column)
+
     row["modtagelsesdato"] = modtagelsesdato
     row["uuid"] = form_id
+    row["beloeb_i_alt"] = beloeb
     row["aendret_beloeb_i_alt"] = aendret_beloeb
     row["godkendt"] = "X" if submission_valid else ""
     row["godkendt_af"] = ""

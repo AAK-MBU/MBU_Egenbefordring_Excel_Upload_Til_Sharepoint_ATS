@@ -47,12 +47,18 @@ The SQL deliberately returns the raw `form_data` JSON rather than projecting col
 field appears in the output purely because its name is listed in `desired_order`. So a pure rename in the form
 needs only a `desired_order` edit, and nothing in SQL.
 
-What a rename does *not* cover is the validation, which reads specific logical values out of the form. Those go
-through `FIELD_SOURCES` / `get_form_field`, which maps one logical field to an ordered list of candidate form
-keys and returns the first non-empty one. This is where the form's split sources are handled: `_mitid` fields
-are prefilled from the citizen's MitID login, `_manuelt` fields are typed by hand, and MitID wins when both are
-present. Add a form field to `FIELD_SOURCES` only when validation needs it — output already works via the
-passthrough.
+What a rename does *not* cover is a value the form splits across several fields. Those go through
+`FIELD_SOURCES` / `get_form_field`, which maps one name to an ordered list of candidate form keys and returns
+the first non-empty one. The list runs most to least trustworthy: `_mitid` fields are prefilled from the
+citizen's MitID login and win, `_manuelt` fields are typed by hand and come next. It is not limited to two —
+the child's CPR falls back a third time to `vaelg_barn`, which is why the candidates are a list rather than a
+pair.
+
+Each `FIELD_SOURCES` key is deliberately both the logical name the validation reads *and* the column name in
+`desired_order`. `build_final_row` writes the collapsed value under that key, which is what keeps the sheet at
+one column per value instead of one per source — the raw `_mitid` / `_manuelt` keys are still on the row from
+the passthrough and are dropped simply by not appearing in `desired_order`. So adding a split field means adding
+one `FIELD_SOURCES` entry and one `desired_order` entry under the same name.
 
 The `_mitid` / `_manuelt` suffixes do **not** always mark two sources for one value, so do not pair fields up by
 name alone. `beloebsmodtager_navn_mitid` / `cpr_beloebsmodtager_mitid` are the logged-in citizen, and
@@ -72,6 +78,10 @@ they were kilometres in the pre-2026 form, and code or tests written against tha
 mis-validate. `is_checked` decides whether a leg was driven and deliberately whitelists the truthy values, so an
 unrecognised value reads as *not driven* rather than inflating a payout.
 
+Entries can arrive with an empty or missing `dato` — the form submits blank repeat rows. `parse_entry_date`
+returns None for those and the loop skips them rather than aborting the whole export; a skipped row is only
+reported to the reviewer when a leg was actually ticked on it, since that is driving the citizen loses.
+
 The distance for a date comes from `get_entry_distance`: the per-entry `distance_manuelt_indtastet` when the
 citizen overrode the lookup, otherwise the submission-level `barn_distance_til_skole_api`. Note this precedence
 is the opposite of `FIELD_SOURCES` — here the manual value is the correction and wins; there MitID is the
@@ -79,6 +89,19 @@ verified source and wins. Distances are one-way per leg, matching `BevilgetKoere
 
 Reported distance is only ever used to *flag* an over-claim. The amount in `process_submission` is
 `valid_legs × bevilling["allowed_distance"] × takst`, always computed from the granted distance.
+
+`beloeb_i_alt` is no longer a form field — the form stopped showing the citizen a predicted amount — so
+`build_final_row` writes the robot's own calculation into it for every submission. Its `beloeb` parameter
+defaults to `0.0` so that every rejection path pays out nothing without having to say so, including any added
+later; only the final return in `process_submission` passes a real figure. That default also stops a partially
+accumulated total from leaking out of a mid-loop rejection, such as a school mismatch found on the second date.
+
+`aendret_beloeb_i_alt` now holds the same number as `beloeb_i_alt` whenever it is set at all. It is kept because
+its emptiness is the signal: a filled cell means the submission was approved but corrected.
+
+`takst` and `antal_dage` were dropped from both the form and the sheet — they existed to show the citizen a
+predicted amount. The rate now lives only in `get_takst_for_date`, so changing it is a code change, and there is
+no column to keep in step with it.
 
 **`processes/error_handling.py`** — `main` maps `BusinessError` → `item.pending_user()` (no mail) and wraps
 anything else in `ProcessError` → `item.fail()` + error email with a screenshot. `handle_error`/`ErrorContext`

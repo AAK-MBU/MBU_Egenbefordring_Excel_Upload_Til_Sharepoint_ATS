@@ -47,10 +47,10 @@ A local `.env` file is picked up automatically.
 2. **Export** — Reads submissions from `[RPA].[journalizing].[view_Journalizing]` where
    `form_type = 'indberetning_af_egenbefordring'` and `status = 'New'` within the date range.
 
-   The form delivers several values from two possible sources: fields suffixed `_mitid` are prefilled from the
-   citizen's MitID login, fields suffixed `_manuelt` are typed by hand when no prefill is available. Both
-   variants are kept as separate columns in the Excel output; validation reads whichever is filled in, with
-   MitID taking precedence.
+   The form delivers several values from more than one source: fields suffixed `_mitid` are prefilled from the
+   citizen's MitID login, fields suffixed `_manuelt` are typed by hand when no prefill is available, and the
+   child's CPR number falls back once more to `vaelg_barn`. They are collapsed into a single value before
+   export, so the sheet keeps one column per value; the MitID value takes precedence, then the manual one.
 
 3. **Validate** — Each submission is matched against the child's bevillinger in `[RPA].[rpa].[BefordringsData]`
    (`BevillingAfKoerselstype = 'Egenbefordring'`), per driving date:
@@ -62,9 +62,15 @@ A local `.env` file is picked up automatically.
    - **Approved with adjustment** (`aendret_beloeb_i_alt` set, reason in `evt_kommentar`) when morning/afternoon
      driving was reported outside what was granted, the reported distance exceeds the granted km, or some dates
      fall outside the active bevillinger.
-   - The adjusted amount is `antal gyldige ture × bevilget afstand × takst`, where the takst is 2,23 kr./km before
-     1 January 2026 and 2,28 kr./km from that date onwards. Note that the amount is always calculated from the
-     *granted* distance, never from the reported one.
+   - The amount is `antal gyldige ture × bevilget afstand × takst`, where the takst is 2,23 kr./km before
+     1 January 2026 and 2,28 kr./km from that date onwards. The rate is hard-coded in `get_takst_for_date`, not
+     taken from the form, so changing it means changing the code. It is always calculated from the *granted* distance,
+     never from the reported one.
+
+   The form no longer shows the citizen a predicted amount, so `beloeb_i_alt` is calculated by the robot for
+   every submission rather than passed through from the form. A rejected submission gets 0. `aendret_beloeb_i_alt`
+   is unchanged: it repeats the same figure, but only on submissions that were approved with a correction, so a
+   reviewer can see at a glance which rows were adjusted.
 
    Each entry in `koerselsliste` is a date on which the citizen ticks off whether they drove to school
    (`til_skole`), home again (`til_hjem`), or both. The distance is not part of the tick-off: it is looked up
