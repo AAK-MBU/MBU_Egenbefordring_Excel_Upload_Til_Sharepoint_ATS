@@ -34,8 +34,10 @@ the ATS API via `helpers/ats_functions.get_workqueue_items`.
 the per-submission validation (`process_submission`, `validate_entries`, `validate_leg`), the DataFrame
 assembly and the SharePoint upload. Two things here are load-bearing:
 
-- The `desired_order` column list is a schema contract with the downstream Queue Uploader robot. Missing columns
-  are backfilled with `""` so the shape is always identical. Reordering or renaming breaks robot 2.
+- The `desired_order` column list is a schema contract with the downstream Udbetaling robot
+  (`AAK-MBU/rpa-udbetaling-af-egenbefordring`, checked out alongside this one). Missing columns are backfilled
+  with `""` so the shape is always identical. Renaming one breaks that robot in two places: `CPR_COLUMNS` in its
+  `helpers/helper_functions.py` and `COLUMNS` in its `processes/finalize_process.py`.
 - School and address comparison is normalization-heavy (`norm`, `remove_numbers`, `parse_selected_school`,
   Danish æ/ø/å folding) because both sides are free text. Changes there directly change who gets paid — recent
   commits have repeatedly loosened and re-tightened these checks.

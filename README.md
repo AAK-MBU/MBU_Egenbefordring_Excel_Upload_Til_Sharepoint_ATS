@@ -82,7 +82,7 @@ A local `.env` file is picked up automatically.
    a violation was judged against; a per-date override is visible inside the `koerselsliste` column.
 
 4. **Upload** — The rows are written to an in-memory `.xlsx` in a fixed column order and uploaded to SharePoint.
-   The column order is a contract with the Queue Uploader robot — do not reorder or rename columns without
+   The column order is a contract with the Udbetaling robot — do not reorder or rename columns without
    updating that robot.
 
 ## Development
@@ -96,16 +96,13 @@ Pull requests to `main` must bump `version` in `pyproject.toml`; a GitHub Action
 
 ## Related robots
 
-The process consists of four robots working in sequence:
+The process is two robots working in sequence:
 
-1. **Create Excel & Upload to SharePoint** — this repository.
-2. **Queue Uploader** — reads the reviewed Excel file and uploads its rows to the
-   `Koerselsgodtgoerelse_egenbefordring` queue:
-   [MBU_Koerselsgodtgoerelse_Skolekoersler_Queue_Uploader](https://github.com/AAK-MBU/MBU_Koerselsgodtgoerelse_Skolekoersler_Queue_Uploader)
-3. **Queue Handler** — processes the queue elements by creating tickets in OPUS:
-   [MBU_Koerselsgodtgoerelse_Skolekoersler_Queue__Handler](https://github.com/AAK-MBU/MBU_Koerselsgodtgoerelse_Skolekoersler_Queue__Handler)
-4. **Update SharePoint** — uploads the updated Excel file and attachments for any failed elements:
-   [MBU_Koerselsgodtgoerelse_Skolekoersler_Update_Sharepoint](https://github.com/AAK-MBU/MBU_Koerselsgodtgoerelse_Skolekoersler_Update_Sharepoint)
+1. **Create Excel & Upload to SharePoint** — this repository. Exports and validates the week's claims, and puts
+   the file in `General` for personnel to review. They move the reviewed file to `General/Til udbetaling`.
+2. **Udbetaling** — reads the reviewed file, creates an outlay ticket in OPUS for every approved row with the
+   citizen's receipt attached, then writes the file back to `General/Behandlet` or `General/Fejlet`:
+   [rpa-udbetaling-af-egenbefordring](https://github.com/AAK-MBU/rpa-udbetaling-af-egenbefordring)
 
-Robots 2–4 are orchestrated by [OpenOrchestrator](https://github.com/itk-dev-rpa/OpenOrchestrator); see their
-respective repositories for their triggers.
+Both run on Automation Server. The `desired_order` column list in this repository is the schema contract between
+them — see that robot's README for the two places that have to agree with it.
