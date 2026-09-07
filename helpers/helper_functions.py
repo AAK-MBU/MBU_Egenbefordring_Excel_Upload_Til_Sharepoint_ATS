@@ -92,6 +92,60 @@ def to_date(value):
 
 
 # --------------------------------------------------------------------
+# Form field access
+# --------------------------------------------------------------------
+# The form can deliver the same logical value from two different places:
+# fields suffixed _mitid are prefilled from the citizen's MitID login, and
+# fields suffixed _manuelt are typed by hand when no prefill is available
+# (for example when the child is not registered under the logged-in parent).
+#
+# The variants are collapsed back into a single value before export, so the
+# sheet keeps one column per value rather than one per source. The candidate
+# list is ordered most to least trustworthy: MitID is the verified source and
+# wins, a hand-typed value comes next, and anything after that is a last
+# resort used only when the earlier sources are empty.
+#
+# Each key is both the logical field name used by the validation and the
+# column name in the Excel output, so the two can never drift apart.
+FIELD_SOURCES = {
+    "barnets_navn": ["barnets_navn_mitid", "barnets_navn_manuelt"],
+    "cpr_nummer_barn": [
+        "cpr_nummer_barn_mitid",
+        "cpr_nummer_barn_manuelt",
+        "vaelg_barn",
+    ],
+    "barnets_adresse": ["barnets_adresse_mitid", "barnets_adresse_manuelt"],
+}
+
+
+def get_form_field(data: dict, field: str):
+    """
+    Read a logical form field, falling back across its possible sources.
+
+    Returns the first non-empty value among the candidate keys in
+    FIELD_SOURCES, so callers do not need to know whether the citizen's
+    data arrived prefilled from MitID or was typed in manually.
+
+    Args:
+        data (dict): The submission's form data.
+        field (str): Logical field name, a key of FIELD_SOURCES.
+
+    Returns:
+        The first non-empty value found, or None if no source is filled in.
+
+    Raises:
+        KeyError: If the logical field name is unknown.
+    """
+
+    for key in FIELD_SOURCES[field]:
+        value = data.get(key)
+        if value not in (None, ""):
+            return value
+
+    return None
+
+
+# --------------------------------------------------------------------
 # Core export
 # --------------------------------------------------------------------
 def export_egenbefordring_from_hub(
@@ -136,7 +190,7 @@ def export_egenbefordring_from_hub(
                 OR
                 TRY_CAST(JSON_VALUE(form_data, '$.entity.completed[0].value') AS DATETIMEOFFSET) BETWEEN ? AND ?
             )
-            AND form_type = 'egenbefordring_ifm_til_skolekoer'
+            AND form_type = 'indberetning_af_egenbefordring'
             AND status = 'New'
     """
 
@@ -179,34 +233,29 @@ def export_egenbefordring_from_hub(
     df = pd.DataFrame(final_rows).where(pd.notnull, "")
 
     desired_order = [
-        "adresse1",
-        "anden_beloebsmodtager_",
-        "antal_dage",
-        "antal_km_i_alt",
         "barnets_navn",
-        "beloeb_i_alt",
-        "cpr_barnet",
-        "cpr_nr",
-        "cpr_nr_paaanden",
-        "jeg_erklaerer_paa_tro_og_love_at_de_oplysninger_jeg_har_givet_er",
-        "jeg_er_indforstaaet_med_at_aarhus_kommune_behandler_angivne_oply",
-        "kilometer_i_alt_fra_skole",
-        "kilometer_i_alt_til_skole",
+        "cpr_nummer_barn",
+        "barnets_adresse",
         "kunne_du_ikke_finde_skole_eller_dagtilbud_paa_listen_",
-        "navn_paa_anden_beloebsmodtager",
-        "navn_paa_beloebsmodtager",
         "skoleliste",
         "skriv_dit_barns_skole_eller_dagtilbud",
-        "takst",
-        "computed_twig_tjek_for_ugenummer",
-        "modtagelsesdato",
+        "barn_distance_til_skole_api",
+        "beloebsmodtager_navn_mitid",
+        "cpr_beloebsmodtager_mitid",
+        "anden_beloebsmodtager_navn_manuelt",
+        "cpr_anden_beloebsmodtager_manuelt",
+        "total_km_beregnet",
+        "beloeb_i_alt",
         "aendret_beloeb_i_alt",
+        "modtagelsesdato",
         "godkendt",
         "godkendt_af",
         "behandlet_ok",
         "behandlet_fejl",
+        "jeg_erklaerer_paa_tro_og_love_at_de_oplysninger_jeg_har_givet_er",
+        "jeg_er_indforstaaet_med_at_aarhus_kommune_behandler_angivne_oply",
         "evt_kommentar",
-        "test",
+        "koerselsliste",
         "attachments",
         "uuid",
     ]
@@ -255,10 +304,23 @@ def process_submission(sub, connection_string, befordrings_query):
     form_data = json.loads(sub.get("form_data"))
     data = form_data.get("data", {})
 
-    barnets_cpr = data.get("cpr_barnet")
-    koerselsliste = data.get("test", [])
+    barnets_cpr = get_form_field(data, "cpr_nummer_barn")
+    koerselsliste = data.get("koerselsliste", [])
 
-    elevens_adresse = str(norm(data.get("adresse1"))).split(",", 1)[0].strip().replace(" ", "").lower().replace("å", "aa").replace("ø", "oe").replace("æ", "ae")
+    # Distance looked up automatically for the child; each entry may override it.
+    api_distance = convert_value_to_float(data.get("barn_distance_til_skole_api"))
+
+    if not barnets_cpr:
+        return build_final_row(
+            data=data,
+            form_id=form_id,
+            modtagelsesdato=modtagelsesdato,
+            submission_valid=False,
+            aendret_beloeb="",
+            kommentar="Barnets CPR-nummer mangler i indberetningen",
+        )
+
+    elevens_adresse = str(norm(get_form_field(data, "barnets_adresse"))).split(",", 1)[0].strip().replace(" ", "").lower().replace("å", "aa").replace("ø", "oe").replace("æ", "ae")
 
     valgt_skole = data.get("skoleliste") or ""
     indtastet_skole = data.get("skriv_dit_barns_skole_eller_dagtilbud") or ""
@@ -294,9 +356,20 @@ def process_submission(sub, connection_string, befordrings_query):
     distance_violation = False
     distance_example = None
     out_of_bevilling_dates = False
+    entries_without_date = False
 
     for entry in koerselsliste:
-        entry_date = datetime.fromisoformat(entry["dato"]).date()
+        entry_date = parse_entry_date(entry.get("dato"))
+
+        if entry_date is None:
+            # A blank repeat row carries no date and nothing to pay out. Only
+            # worth reporting when the citizen actually ticked a leg on it,
+            # since that is driving we cannot match to a bevilling.
+            if is_checked(entry.get("til_skole")) or is_checked(
+                entry.get("til_hjem")
+            ):
+                entries_without_date = True
+            continue
 
         matches = find_bevillinger_for_date(bevillinger, entry_date)
 
@@ -361,10 +434,11 @@ def process_submission(sub, connection_string, befordrings_query):
             )
 
         validation = validate_entries(
-            test_list=[entry],
+            entries=[entry],
             allowed_morgen=bevilling["allowed_morgen"],
             allowed_efter=bevilling["allowed_efter"],
             allowed_distance=bevilling["allowed_distance"],
+            api_distance=api_distance,
         )
 
         if validation["wrong_morgen"]:
@@ -399,9 +473,14 @@ def process_submission(sub, connection_string, befordrings_query):
         )
 
     if not found_any_valid_bevilling:
-        comments.append(
-            "Indberettet kørsel ligger udenfor aktiv bevilling"
-        )
+        if entries_without_date and not out_of_bevilling_dates:
+            comments.append(
+                "Indberetningen indeholder ingen gyldige kørselsdatoer"
+            )
+        else:
+            comments.append(
+                "Indberettet kørsel ligger udenfor aktiv bevilling"
+            )
         return build_final_row(
             data=data,
             form_id=form_id,
@@ -433,10 +512,17 @@ def process_submission(sub, connection_string, befordrings_query):
             "Borger har indtastet kørsel på datoer uden for aktive bevillinger"
         )
 
+    if entries_without_date:
+        comments.append(
+            "Borger har indtastet kørsel uden dato"
+        )
+
     submission_valid = total_valid_legs > 0
 
+    beloeb = round(total_beloeb, 2)
+
     if submission_valid and comments:
-        aendret_beloeb = round(total_beloeb, 2)
+        aendret_beloeb = beloeb
     else:
         aendret_beloeb = ""
 
@@ -447,6 +533,7 @@ def process_submission(sub, connection_string, befordrings_query):
         submission_valid=submission_valid,
         aendret_beloeb=aendret_beloeb,
         kommentar="; ".join(comments),
+        beloeb=beloeb,
     )
 
 
@@ -516,23 +603,92 @@ def find_bevillinger_for_date(bevillinger, d):
 # --------------------------------------------------------------------
 # Validation helpers
 # --------------------------------------------------------------------
-def validate_entries(test_list, allowed_morgen, allowed_efter, allowed_distance):
+def parse_entry_date(value):
+    """
+    Parse the date of a single koerselsliste entry.
+
+    The form can submit rows with an empty or malformed date, for example
+    a repeat row the citizen left blank. Those must not abort the whole
+    export, so an unusable value yields None for the caller to handle.
+
+    Args:
+        value (any): Raw "dato" value from the entry.
+
+    Returns:
+        date | None: Parsed date, or None if the value is unusable.
+    """
+
+    if value in (None, ""):
+        return None
+
+    try:
+        return datetime.fromisoformat(str(value)).date()
+    except ValueError:
+        return None
+
+
+def is_checked(value) -> bool:
+    """
+    Determine whether a checkbox-style form value is ticked.
+
+    The form reports a driven leg as "1" and an undriven one as an empty
+    value. Anything unrecognised counts as not driven, so an unexpected
+    value can never inflate a reimbursement.
+
+    Args:
+        value (any): Raw value from the form.
+
+    Returns:
+        bool: True if the box is ticked.
+    """
+
+    return str(value).strip().lower() in {"1", "true", "ja", "x", "on"}
+
+
+def get_entry_distance(entry: dict, api_distance: float | None) -> float | None:
+    """
+    Resolve the reported one-way distance for a single driving date.
+
+    The distance to school is normally looked up automatically, but the
+    citizen can type it in per date when the lookup is wrong or missing.
+    A manually entered value therefore takes precedence.
+
+    Args:
+        entry (dict): One entry from koerselsliste.
+        api_distance (float | None): Automatically retrieved distance.
+
+    Returns:
+        float | None: Distance to use, or None if neither source has one.
+    """
+
+    manual = convert_value_to_float(entry.get("distance_manuelt_indtastet"))
+    if manual is not None and manual > 0:
+        return manual
+
+    return api_distance
+
+
+def validate_entries(
+    entries, allowed_morgen, allowed_efter, allowed_distance, api_distance
+):
     """
     Validate reported driving entries for a single submission date.
 
-    Each entry is checked for:
+    Each entry ticks off which legs were driven that day; the distance is
+    taken from the automatic lookup unless the citizen overrode it. Each
+    leg is checked for:
     - Allowed morning / afternoon driving
     - Distance violations
-    - Count of valid driving legs
 
     The function aggregates validation flags to support both
     hard rejections and adjustable corrections.
 
     Args:
-        test_list (list[dict]): Driving entries for a single date.
+        entries (list[dict]): Driving entries for a single date.
         allowed_morgen (bool): Whether morning driving is allowed.
         allowed_efter (bool): Whether afternoon driving is allowed.
-        allowed_distance (float): Maximum approved distance.
+        allowed_distance (float): Maximum approved distance per leg.
+        api_distance (float | None): Automatically retrieved distance.
 
     Returns:
         dict: Validation results and counters.
@@ -544,12 +700,18 @@ def validate_entries(test_list, allowed_morgen, allowed_efter, allowed_distance)
     distance_example = None
     valid_legs = 0
 
-    for entry in test_list:
-        km_til = convert_value_to_float(entry.get("til_skole"))
-        km_fra = convert_value_to_float(entry.get("til_hjem"))
+    for entry in entries:
+        reported_distance = get_entry_distance(entry, api_distance)
+
+        drove_til_skole = is_checked(entry.get("til_skole"))
+        drove_til_hjem = is_checked(entry.get("til_hjem"))
 
         is_valid, is_wrong, distance_violation, example = validate_leg(
-            km_til, allowed_morgen, allowed_distance, distance_violation
+            drove_til_skole,
+            allowed_morgen,
+            reported_distance,
+            allowed_distance,
+            distance_violation,
         )
         if is_wrong:
             wrong_morgen = True
@@ -559,7 +721,11 @@ def validate_entries(test_list, allowed_morgen, allowed_efter, allowed_distance)
             distance_example = example
 
         is_valid, is_wrong, distance_violation, example = validate_leg(
-            km_fra, allowed_efter, allowed_distance, distance_violation
+            drove_til_hjem,
+            allowed_efter,
+            reported_distance,
+            allowed_distance,
+            distance_violation,
         )
         if is_wrong:
             wrong_efter = True
@@ -577,12 +743,14 @@ def validate_entries(test_list, allowed_morgen, allowed_efter, allowed_distance)
     }
 
 
-def validate_leg(km, allowed, allowed_distance, distance_violation):
+def validate_leg(
+    driven, allowed, reported_distance, allowed_distance, distance_violation
+):
     """
     Validate a single driving leg.
 
     Determines whether the leg:
-    - Is present and positive
+    - Was ticked off as driven
     - Is allowed for the given time slot
     - Exceeds the approved distance
 
@@ -590,25 +758,31 @@ def validate_leg(km, allowed, allowed_distance, distance_violation):
     the leg entirely, allowing for adjusted reimbursement.
 
     Args:
-        km (float | None): Reported distance.
+        driven (bool): Whether the citizen ticked this leg.
         allowed (bool): Whether this leg type is allowed.
-        allowed_distance (float): Approved maximum distance.
+        reported_distance (float | None): Distance reported for the date.
+        allowed_distance (float): Approved maximum distance per leg.
         distance_violation (bool): Existing violation state.
 
     Returns:
         tuple: (is_valid, is_wrong_time, distance_violation, example)
     """
 
-    if km is None or km <= 0:
+    if not driven:
         return False, False, distance_violation, None
 
     if not allowed:
         return False, True, distance_violation, None
 
-    if allowed_distance <= 0 or distance_violation or km <= allowed_distance:
+    if (
+        reported_distance is None
+        or allowed_distance <= 0
+        or distance_violation
+        or reported_distance <= allowed_distance
+    ):
         return True, False, distance_violation, None
 
-    return True, False, True, (km, allowed_distance)
+    return True, False, True, (reported_distance, allowed_distance)
 
 
 # --------------------------------------------------------------------
@@ -621,12 +795,18 @@ def build_final_row(
     submission_valid,
     aendret_beloeb,
     kommentar,
+    beloeb=0.0,
 ):
     """
     Build the final flattened row for Excel export.
 
     Combines original form data with system-generated fields
-    such as approval flags, adjusted amount, and comments.
+    such as approval flags, calculated amount, and comments.
+
+    The form no longer shows the citizen a predicted amount, so
+    beloeb_i_alt is calculated here for every submission. It defaults to
+    0.0 because a rejected submission pays out nothing, which also keeps
+    any future rejection path from accidentally reporting an amount.
 
     Args:
         data (dict): Original form data.
@@ -635,6 +815,7 @@ def build_final_row(
         submission_valid (bool): Whether the submission is approved.
         aendret_beloeb (float | str): Adjusted reimbursement amount.
         kommentar (str): Processing comments.
+        beloeb (float): Calculated reimbursement amount.
 
     Returns:
         dict: Final row for Excel output.
@@ -642,8 +823,13 @@ def build_final_row(
 
     row = dict(data)
 
+    # Collapse each split-source field into the single column it maps to.
+    for column in FIELD_SOURCES:
+        row[column] = get_form_field(data, column)
+
     row["modtagelsesdato"] = modtagelsesdato
     row["uuid"] = form_id
+    row["beloeb_i_alt"] = beloeb
     row["aendret_beloeb_i_alt"] = aendret_beloeb
     row["godkendt"] = "X" if submission_valid else ""
     row["godkendt_af"] = ""
@@ -651,7 +837,7 @@ def build_final_row(
     row["behandlet_fejl"] = ""
     row["evt_kommentar"] = kommentar
 
-    row.setdefault("test", data.get("test"))
+    row.setdefault("koerselsliste", data.get("koerselsliste"))
     row.setdefault("attachments", data.get("attachments"))
 
     return row
