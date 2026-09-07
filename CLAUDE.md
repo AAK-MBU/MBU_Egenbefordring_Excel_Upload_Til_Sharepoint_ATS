@@ -38,9 +38,15 @@ assembly and the SharePoint upload. Two things here are load-bearing:
   (`AAK-MBU/rpa-udbetaling-af-egenbefordring`, checked out alongside this one). Missing columns are backfilled
   with `""` so the shape is always identical. Renaming one breaks that robot in two places: `CPR_COLUMNS` in its
   `helpers/helper_functions.py` and `COLUMNS` in its `processes/finalize_process.py`.
-- School and address comparison is normalization-heavy (`norm`, `remove_numbers`, `parse_selected_school`,
+- School and address comparison is normalization-heavy (`norm`, `normalize_address`, `parse_selected_school`,
   Danish æ/ø/å folding) because both sides are free text. Changes there directly change who gets paid — recent
   commits have repeatedly loosened and re-tightened these checks.
+- `normalize_address` compares street name + house number and deliberately drops the floor, door, postcode and
+  city. That is not laziness: the citizen's address is prefilled from MitID and the bevilling's comes from
+  BefordringsData, and the two disagree on the tail ("Aarhus N" vs "Aarhus Nord", postcode present or absent)
+  far more often than they disagree on the street. Comparing the whole string instead would hard-reject
+  legitimate claims. The trade-off it accepts is that the same street name in two different postcodes still
+  matches.
 
 ### When the form changes
 

@@ -320,7 +320,7 @@ def process_submission(sub, connection_string, befordrings_query):
             kommentar="Barnets CPR-nummer mangler i indberetningen",
         )
 
-    elevens_adresse = str(norm(get_form_field(data, "barnets_adresse"))).split(",", 1)[0].strip().replace(" ", "").lower().replace("å", "aa").replace("ø", "oe").replace("æ", "ae")
+    elevens_adresse = normalize_address(get_form_field(data, "barnets_adresse"))
 
     valgt_skole = data.get("skoleliste") or ""
     indtastet_skole = data.get("skriv_dit_barns_skole_eller_dagtilbud") or ""
@@ -384,7 +384,7 @@ def process_submission(sub, connection_string, befordrings_query):
         found_any_valid_bevilling = True
         bevilling = matches[0]
 
-        adresse_paa_fundet_bevilling = str(norm(bevilling.get("bevilget_addresse"))).split(",", 1)[0].strip().replace(" ", "").lower().replace("å", "aa").replace("ø", "oe").replace("æ", "ae")
+        adresse_paa_fundet_bevilling = normalize_address(bevilling.get("bevilget_addresse"))
 
         # --- School comparison (supports split schools) ---
         submission_school_name = parse_selected_school(
@@ -423,7 +423,7 @@ def process_submission(sub, connection_string, befordrings_query):
                 kommentar="Indberettet skole matcher ikke barnets bevilling",
             )
 
-        if remove_numbers(elevens_adresse) != remove_numbers(adresse_paa_fundet_bevilling):
+        if elevens_adresse != adresse_paa_fundet_bevilling:
             return build_final_row(
                 data=data,
                 form_id=form_id,
@@ -988,18 +988,45 @@ def norm(v):
     return (v or "").lower().strip()
 
 
-def remove_numbers(s: str) -> str:
+def normalize_address(value) -> str:
     """
-    Remove all numeric characters from a string.
+    Reduce an address to street name and house number for comparison.
 
-    Primarily used to compare addresses while ignoring
-    house numbers and floor indicators.
+    The two addresses being compared come from different systems - the
+    citizen's is prefilled from their MitID login, the bevilling's comes
+    from BefordringsData - so they agree on the street and number but not
+    on how the rest is written. Everything that varies is dropped:
+
+    - punctuation and spacing, so "H. C. Andersens Vej" matches "HC
+      Andersens Vej" and "15 3. th" matches "15, 3. th"
+    - the floor and door, and the postcode and city, which the two systems
+      abbreviate differently ("Aarhus N" vs "Aarhus Nord") or omit entirely
+
+    Everything from the first number onwards is treated as the house
+    number, which both ends the street name and discards the tail. A
+    single letter directly after it is kept, so 15A and 15B stay distinct.
 
     Args:
-        s (str): Input string.
+        value (any): Raw address value.
 
     Returns:
-        str: String without digits.
+        str: Comparable form, e.g. "aabogade15". Empty if there is no address.
     """
 
-    return re.sub(r"\d+", "", s or "").strip()
+    address = norm(value).replace("å", "aa").replace("ø", "oe").replace("æ", "ae")
+    address = address.split(",", 1)[0]
+
+    number_match = re.search(r"\d+", address)
+
+    if not number_match:
+        return re.sub(r"[^a-z0-9]", "", address)
+
+    street = re.sub(r"[^a-z0-9]", "", address[: number_match.start()])
+    number = number_match.group(0)
+
+    suffix_match = re.match(r"\s*([a-z])(?![a-z])", address[number_match.end():])
+
+    if suffix_match:
+        number += suffix_match.group(1)
+
+    return street + number

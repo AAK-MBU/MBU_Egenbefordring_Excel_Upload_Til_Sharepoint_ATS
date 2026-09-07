@@ -57,8 +57,12 @@ A local `.env` file is picked up automatically.
 
    - **Rejected** (`godkendt` = false) when the child's CPR number is missing from the submission, there is no
      active bevilling, more than one bevilling covers the same date, the bevilling has no school or address, the
-     reported school does not match the bevilling's school, the reported street name does not match the
-     bevilling's address, or no valid driving legs remain.
+     reported school does not match the bevilling's school, the reported street name and house number do not
+     match the bevilling's address, or no valid driving legs remain.
+
+     Addresses are compared on street name and house number only. Floor, door, postcode and city are dropped,
+     because the citizen's address is prefilled from MitID while the bevilling's comes from BefordringsData and
+     the two write the tail differently; punctuation and spacing are ignored too.
    - **Approved with adjustment** (`aendret_beloeb_i_alt` set, reason in `evt_kommentar`) when morning/afternoon
      driving was reported outside what was granted, the reported distance exceeds the granted km, or some dates
      fall outside the active bevillinger.
