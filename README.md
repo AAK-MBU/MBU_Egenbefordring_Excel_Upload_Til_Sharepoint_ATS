@@ -52,17 +52,30 @@ A local `.env` file is picked up automatically.
    child's CPR number falls back once more to `vaelg_barn`. They are collapsed into a single value before
    export, so the sheet keeps one column per value; the MitID value takes precedence, then the manual one.
 
+   `adresse_der_blev_koert_til_fra` is always filled in by the current form. It falls back to `barnets_adresse`
+   only to cover submissions made before the field existed, which can still be waiting with `status = 'New'`.
+
 3. **Validate** — Each submission is matched against the child's bevillinger in `[RPA].[rpa].[BefordringsData]`
    (`BevillingAfKoerselstype = 'Egenbefordring'`), per driving date:
 
+   - **Sent to manual handling** (`godkendt` = false, reason in `evt_kommentar`) when the bevilling covering the
+     claimed dates has anything written in its `Kommentar` column. A case worker only writes there when
+     something about the bevilling needs saying, so the row is never auto-approved; the comment text is copied
+     into `evt_kommentar` so the reviewer can see what it said without opening BefordringsData.
    - **Rejected** (`godkendt` = false) when the child's CPR number is missing from the submission, there is no
-     active bevilling, more than one bevilling covers the same date, the bevilling has no school or address, the
+     active bevilling, two bevillinger covering the same date conflict, the bevilling has no school or address, the
      reported school does not match the bevilling's school, the reported street name and house number do not
      match the bevilling's address, or no valid driving legs remain.
 
      Addresses are compared on street name and house number only. Floor, door, postcode and city are dropped,
      because the citizen's address is prefilled from MitID while the bevilling's comes from BefordringsData and
      the two write the tail differently; punctuation and spacing are ignored too.
+
+     When several bevillinger cover the same date, identical rows are treated as one grant recorded twice and
+     the claim is processed normally. If they differ in time of day, granted distance, school or address, the
+     submission goes to manual handling — there is no way to tell which one the citizen drove under. So does a
+     bevilling whose `TidspunktForBevilling` reads as neither morgen nor eftermiddag, since it grants nothing
+     and cannot safely be ignored.
    - **Approved with adjustment** (`aendret_beloeb_i_alt` set, reason in `evt_kommentar`) when morning/afternoon
      driving was reported outside what was granted, the reported distance exceeds the granted km, or some dates
      fall outside the active bevillinger.

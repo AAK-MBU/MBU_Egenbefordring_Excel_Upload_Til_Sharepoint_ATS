@@ -62,6 +62,14 @@ citizen's MitID login and win, `_manuelt` fields are typed by hand and come next
 the child's CPR falls back a third time to `vaelg_barn`, which is why the candidates are a list rather than a
 pair.
 
+A candidate list holds *raw form keys*, never another `FIELD_SOURCES` key. `adresse_der_blev_koert_til_fra`
+falls back to the child's address, so it lists that field's own raw sources via `BARNETS_ADRESSE_SOURCES`
+rather than naming `barnets_adresse`, which exists only as an output column.
+
+That fallback is a migration allowance, not a business rule: the current form always fills the field in, and it
+is there only for submissions created before the field was added. Do not build behaviour on the assumption that
+an empty value means something.
+
 Each `FIELD_SOURCES` key is deliberately both the logical name the validation reads *and* the column name in
 `desired_order`. `build_final_row` writes the collapsed value under that key, which is what keeps the sheet at
 one column per value instead of one per source — the raw `_mitid` / `_manuelt` keys are still on the row from
@@ -90,10 +98,53 @@ Entries can arrive with an empty or missing `dato` — the form submits blank re
 returns None for those and the loop skips them rather than aborting the whole export; a skipped row is only
 reported to the reviewer when a leg was actually ticked on it, since that is driving the citizen loses.
 
-The distance for a date comes from `get_entry_distance`: the per-entry `distance_manuelt_indtastet` when the
-citizen overrode the lookup, otherwise the submission-level `barn_distance_til_skole_api`. Note this precedence
-is the opposite of `FIELD_SOURCES` — here the manual value is the correction and wins; there MitID is the
-verified source and wins. Distances are one-way per leg, matching `BevilgetKoereAfstand`.
+The distance for a leg comes from `get_entry_distance(entry, leg, api_distance)`: the citizen's own value for
+that leg when they overrode the lookup, otherwise the submission-level `barn_distance_til_skole_api`. This
+precedence is the opposite of `FIELD_SOURCES` — here the manual value is the correction and wins; there MitID is
+the verified source and wins. Distances are one-way per leg, matching `BevilgetKoereAfstand`.
+
+`MANUAL_DISTANCE_SOURCES` maps each leg to every field name that override has had. The form has been through
+several shapes and submissions made under an older one can still be sitting at `status = 'New'`, so all of them
+are accepted: `distance_hjem_og_skole_manuelt_indtastet` (one value for both directions),
+`distance_til_skole_manuelt_indtastet` / `distance_til_hjem_manuelt_indtastet` (a value per direction) and
+`distance_manuelt_indtastet`. Resolution is per leg precisely because the per-direction shape can differ
+between the two.
+
+### Multiple bevillinger on one date
+
+`resolve_bevilling_for_date` reduces the bevillinger active on a date to the one that applies. Rows that are
+identical — `bevilling_values` compares time-of-day flags, granted distance, school and address — are the same
+grant recorded more than once and collapse to the first. As soon as two rows differ in any of those, the
+submission goes to manual handling: nothing says which one the citizen drove under.
+
+`bevilling_values` deliberately excludes `BevillingFra` / `BevillingTil`. Two rows both covering the date grant
+the same thing regardless of how far their ranges extend, so differing ranges alone must not force a manual
+check.
+
+This rule has changed twice, so do not "improve" it without asking. The original was a blanket
+`len(matches) > 1` rejection. It was then replaced by a merge that combined a morning and an afternoon bevilling
+into one grant carrying a distance per direction — the reasoning being that differing distances per direction
+are precisely what a single row cannot express. That merge was deliberately reverted in favour of the current
+rule: a split like that now goes to manual handling rather than being paid automatically. An even older version
+OR'd the time flags across all rows while silently using one row's distance, which is the overpayment every
+later shape has avoided.
+
+`allowed_morgen` / `allowed_efter` are substring matches on `TidspunktForBevilling`, so a value matching
+neither — NULL, empty, a typo, a wording nobody anticipated — describes a row that grants nothing. Such a row is
+rejected before resolving, with its own comment, rather than being treated as a row like any other.
+
+### Kommentar on a bevilling means hands off
+
+A non-empty `Kommentar` on a bevilling in `BefordringsData` stops the submission before any validation runs and
+copies the text into `evt_kommentar`. There is no separate "manual handling" state in the sheet — the downstream
+robot only picks up rows whose `godkendt` contains an `x`, so leaving `godkendt` empty *is* the handoff to a
+person.
+
+Only bevillinger covering the dates being claimed are checked, not every row the child has. A note left on a
+bevilling that expired last year would otherwise block that child's payment every week forever.
+
+"Being claimed" means *any* date present in `koerselsliste`, including a row where neither leg is ticked — every
+submitted date counts as claimed. So the check is deliberately not gated on `is_checked`; do not add that.
 
 Reported distance is only ever used to *flag* an over-claim. The amount in `process_submission` is
 `valid_legs × bevilling["allowed_distance"] × takst`, always computed from the granted distance.

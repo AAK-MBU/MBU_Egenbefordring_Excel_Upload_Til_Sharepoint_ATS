@@ -107,6 +107,8 @@ def to_date(value):
 #
 # Each key is both the logical field name used by the validation and the
 # column name in the Excel output, so the two can never drift apart.
+BARNETS_ADRESSE_SOURCES = ["barnets_adresse_mitid", "barnets_adresse_manuelt"]
+
 FIELD_SOURCES = {
     "barnets_navn": ["barnets_navn_mitid", "barnets_navn_manuelt"],
     "cpr_nummer_barn": [
@@ -114,7 +116,14 @@ FIELD_SOURCES = {
         "cpr_nummer_barn_manuelt",
         "vaelg_barn",
     ],
-    "barnets_adresse": ["barnets_adresse_mitid", "barnets_adresse_manuelt"],
+    "barnets_adresse": BARNETS_ADRESSE_SOURCES,
+    # The form always fills this in now. The fallback is only for
+    # submissions made before the field was added, which can still be
+    # sitting with status 'New'; it can go once those have been drained.
+    "adresse_der_blev_koert_til_fra": [
+        "adresse_der_blev_koert_til_fra",
+        *BARNETS_ADRESSE_SOURCES,
+    ],
 }
 
 
@@ -203,7 +212,8 @@ def export_egenbefordring_from_hub(
             SkoleNavnBefordring,
             SkolensAdresse,
             BevillingFra,
-            BevillingTil
+            BevillingTil,
+            Kommentar
         FROM
             [RPA].[rpa].[BefordringsData]
         WHERE
@@ -236,6 +246,7 @@ def export_egenbefordring_from_hub(
         "barnets_navn",
         "cpr_nummer_barn",
         "barnets_adresse",
+        "adresse_der_blev_koert_til_fra",
         "kunne_du_ikke_finde_skole_eller_dagtilbud_paa_listen_",
         "skoleliste",
         "skriv_dit_barns_skole_eller_dagtilbud",
@@ -349,7 +360,7 @@ def process_submission(sub, connection_string, befordrings_query):
     total_beloeb = 0.0
 
     found_any_valid_bevilling = False
-    overlapping_bevilling_found = False
+    conflicting_bevillinger = False
 
     wrong_morgen = False
     wrong_efter = False
@@ -357,6 +368,8 @@ def process_submission(sub, connection_string, befordrings_query):
     distance_example = None
     out_of_bevilling_dates = False
     entries_without_date = False
+    unreadable_tidspunkt = False
+    bevilling_kommentar = None
 
     for entry in koerselsliste:
         entry_date = parse_entry_date(entry.get("dato"))
@@ -377,12 +390,28 @@ def process_submission(sub, connection_string, befordrings_query):
             out_of_bevilling_dates = True
             continue
 
-        if len(matches) > 1:
-            overlapping_bevilling_found = True
+        # A case worker only writes in Kommentar when something about the
+        # bevilling needs saying, so the row is never auto-approved.
+        kommenterede = [m for m in matches if str(m.get("kommentar") or "").strip()]
+
+        if kommenterede:
+            bevilling_kommentar = str(kommenterede[0]["kommentar"]).strip()
+            break  # 🚫 immediate hard stop
+
+        # allowed_morgen / allowed_efter come from substring-matching
+        # TidspunktForBevilling. A value matching neither grants nothing, so
+        # merging would drop the row silently - including its distance.
+        if any(not m["allowed_morgen"] and not m["allowed_efter"] for m in matches):
+            unreadable_tidspunkt = True
+            break  # 🚫 immediate hard stop
+
+        bevilling = resolve_bevilling_for_date(matches)
+
+        if bevilling is None:
+            conflicting_bevillinger = True
             break  # 🚫 immediate hard stop
 
         found_any_valid_bevilling = True
-        bevilling = matches[0]
 
         adresse_paa_fundet_bevilling = normalize_address(bevilling.get("bevilget_addresse"))
 
@@ -459,9 +488,36 @@ def process_submission(sub, connection_string, befordrings_query):
     comments = []
 
     # 🚫 Hard rejection cases
-    if overlapping_bevilling_found:
+    if bevilling_kommentar:
         comments.append(
-            "Borger har flere aktive egenbefordrings-bevillinger på samme dato"
+            f"Bevillingen har en kommentar og skal behandles manuelt: {bevilling_kommentar}"
+        )
+        return build_final_row(
+            data=data,
+            form_id=form_id,
+            modtagelsesdato=modtagelsesdato,
+            submission_valid=False,
+            aendret_beloeb="",
+            kommentar="; ".join(comments),
+        )
+
+    if unreadable_tidspunkt:
+        comments.append(
+            "Bevillingens tidspunkt er hverken morgen eller eftermiddag"
+        )
+        return build_final_row(
+            data=data,
+            form_id=form_id,
+            modtagelsesdato=modtagelsesdato,
+            submission_valid=False,
+            aendret_beloeb="",
+            kommentar="; ".join(comments),
+        )
+
+    if conflicting_bevillinger:
+        comments.append(
+            "Borger har flere aktive egenbefordrings-bevillinger "
+            "med forskellige værdier på samme dato"
         )
         return build_final_row(
             data=data,
@@ -576,6 +632,7 @@ def normalize_bevillinger(rows):
                 "bevilget_skole": r.get("SkoleNavnBefordring"),
                 "skolens_adresse": r.get("SkolensAdresse"),
                 "bevilget_addresse": r.get("ElevensAdresse"),
+                "kommentar": r.get("Kommentar"),
             }
         )
 
@@ -598,6 +655,55 @@ def find_bevillinger_for_date(bevillinger, d):
         b for b in bevillinger
         if b["from"] <= d <= b["to"]
     ]
+
+
+def bevilling_values(bevilling) -> tuple:
+    """
+    The fields of a bevilling that decide validation and payment.
+
+    Used to tell a row duplicated verbatim apart from two rows that really
+    say different things. Date ranges are excluded: two rows covering the
+    same date with otherwise identical values grant the same thing.
+
+    Args:
+        bevilling (dict): A normalized bevilling.
+
+    Returns:
+        tuple: Comparable summary of the row.
+    """
+
+    return (
+        bevilling["allowed_morgen"],
+        bevilling["allowed_efter"],
+        bevilling["allowed_distance"],
+        norm(bevilling.get("bevilget_skole")),
+        normalize_address(bevilling.get("bevilget_addresse")),
+    )
+
+
+def resolve_bevilling_for_date(matches):
+    """
+    Reduce the bevillinger active on one date to the one that applies.
+
+    Rows holding identical values are the same grant recorded more than
+    once, so they collapse to the first. As soon as two rows differ in
+    anything the validation uses there is no way to tell which one the
+    citizen drove under, so the submission goes to manual handling.
+
+    Args:
+        matches (list[dict]): Bevillinger active on the date.
+
+    Returns:
+        dict | None: The bevilling to use, or None if the rows differ.
+    """
+
+    first = matches[0]
+
+    for bevilling in matches[1:]:
+        if bevilling_values(bevilling) != bevilling_values(first):
+            return None
+
+    return first
 
 
 # --------------------------------------------------------------------
@@ -645,25 +751,52 @@ def is_checked(value) -> bool:
     return str(value).strip().lower() in {"1", "true", "ja", "x", "on"}
 
 
-def get_entry_distance(entry: dict, api_distance: float | None) -> float | None:
-    """
-    Resolve the reported one-way distance for a single driving date.
+# Where a koerselsliste entry carries the citizen's own distance for a leg.
+# The form has been through several shapes and submissions made under an
+# older one can still be waiting with status 'New', so every known field
+# name is accepted, most recent first. Older shapes gave each direction its
+# own field; newer ones use one home-school value for both.
+MANUAL_DISTANCE_SOURCES = {
+    "til_skole": [
+        "distance_hjem_og_skole_manuelt_indtastet",
+        "distance_til_skole_manuelt_indtastet",
+        "distance_manuelt_indtastet",
+    ],
+    "til_hjem": [
+        "distance_hjem_og_skole_manuelt_indtastet",
+        "distance_til_hjem_manuelt_indtastet",
+        "distance_manuelt_indtastet",
+    ],
+}
 
-    The distance to school is normally looked up automatically, but the
-    citizen can type it in per date when the lookup is wrong or missing.
-    A manually entered value therefore takes precedence.
+
+def get_entry_distance(
+    entry: dict, leg: str, api_distance: float | None
+) -> float | None:
+    """
+    Resolve the reported one-way distance for one leg of one date.
+
+    The distance is normally looked up automatically, but the citizen can
+    type it in per date when the lookup is wrong or missing, so a manually
+    entered value takes precedence.
 
     Args:
         entry (dict): One entry from koerselsliste.
+        leg (str): Which leg, a key of MANUAL_DISTANCE_SOURCES.
         api_distance (float | None): Automatically retrieved distance.
 
     Returns:
-        float | None: Distance to use, or None if neither source has one.
+        float | None: Distance to use, or None if no source has one.
+
+    Raises:
+        KeyError: If the leg name is unknown.
     """
 
-    manual = convert_value_to_float(entry.get("distance_manuelt_indtastet"))
-    if manual is not None and manual > 0:
-        return manual
+    for field in MANUAL_DISTANCE_SOURCES[leg]:
+        manual = convert_value_to_float(entry.get(field))
+
+        if manual is not None and manual > 0:
+            return manual
 
     return api_distance
 
@@ -675,8 +808,8 @@ def validate_entries(
     Validate reported driving entries for a single submission date.
 
     Each entry ticks off which legs were driven that day; the distance is
-    taken from the automatic lookup unless the citizen overrode it. Each
-    leg is checked for:
+    taken from the automatic lookup unless the citizen overrode it for that
+    leg. Each leg is checked for:
     - Allowed morning / afternoon driving
     - Distance violations
 
@@ -687,7 +820,7 @@ def validate_entries(
         entries (list[dict]): Driving entries for a single date.
         allowed_morgen (bool): Whether morning driving is allowed.
         allowed_efter (bool): Whether afternoon driving is allowed.
-        allowed_distance (float): Maximum approved distance per leg.
+        allowed_distance (float): Approved maximum distance per leg.
         api_distance (float | None): Automatically retrieved distance.
 
     Returns:
@@ -701,15 +834,10 @@ def validate_entries(
     valid_legs = 0
 
     for entry in entries:
-        reported_distance = get_entry_distance(entry, api_distance)
-
-        drove_til_skole = is_checked(entry.get("til_skole"))
-        drove_til_hjem = is_checked(entry.get("til_hjem"))
-
         is_valid, is_wrong, distance_violation, example = validate_leg(
-            drove_til_skole,
+            is_checked(entry.get("til_skole")),
             allowed_morgen,
-            reported_distance,
+            get_entry_distance(entry, "til_skole", api_distance),
             allowed_distance,
             distance_violation,
         )
@@ -721,9 +849,9 @@ def validate_entries(
             distance_example = example
 
         is_valid, is_wrong, distance_violation, example = validate_leg(
-            drove_til_hjem,
+            is_checked(entry.get("til_hjem")),
             allowed_efter,
-            reported_distance,
+            get_entry_distance(entry, "til_hjem", api_distance),
             allowed_distance,
             distance_violation,
         )
