@@ -87,28 +87,37 @@ The remaining hard-coded form keys in `process_submission` are `koerselsliste` (
 `barn_distance_til_skole_api`, `skoleliste` and `skriv_dit_barns_skole_eller_dagtilbud`. Those are the ones to
 check first after a form change.
 
-### Legs are ticked off, distances come from elsewhere
+### How a leg is read
 
-`til_skole` and `til_hjem` on a `koerselsliste` entry are **checkmarks** (`"1"` / empty), not kilometre values —
-they were kilometres in the pre-2026 form, and code or tests written against that older shape will silently
-mis-validate. `is_checked` decides whether a leg was driven and deliberately whitelists the truthy values, so an
-unrecognised value reads as *not driven* rather than inflating a payout.
+Whether a leg was driven, and how far, are separate questions with separate sources, and the form has answered
+them in several different ways. `LEG_SOURCES` holds every known field name per leg, most recent first;
+submissions made under an older shape can still be sitting at `status = 'New'`, so all of them stay supported.
+
+`is_leg_driven` answers the first question. A shape carrying a tick-off field (`til_skole`, `til_hjem`) is
+answered by it, *even when unticked* — key present wins. The current shape has no tick-offs at all: the citizen
+types a distance per leg and fills one in only for a leg they actually drove, so a value present means driven.
+`is_checked` whitelists the truthy values, so an unrecognised one reads as *not driven* rather than inflating a
+payout. Note that in the pre-2026 form `til_skole` / `til_hjem` held kilometres rather than ticks — code or
+tests written against that shape will silently mis-validate.
+
+`get_reported_distance` answers the second, from the entry's own fields only. `get_entry_distance` adds the
+submission-level `barn_distance_til_skole_api` as a fallback for shapes that never asked the citizen for a
+distance. Keep those two separate: the lookup exists for every child on every date, so deciding *driven* from
+it would make every leg of every date read as driven. This precedence is the opposite of `FIELD_SOURCES` —
+here the citizen's manual value is the correction and wins; there MitID is the verified source and wins.
+Distances are one-way per leg, matching `BevilgetKoereAfstand`.
 
 Entries can arrive with an empty or missing `dato` — the form submits blank repeat rows. `parse_entry_date`
 returns None for those and the loop skips them rather than aborting the whole export; a skipped row is only
-reported to the reviewer when a leg was actually ticked on it, since that is driving the citizen loses.
+reported to the reviewer when a leg was actually driven on it, since that is driving the citizen loses.
 
-The distance for a leg comes from `get_entry_distance(entry, leg, api_distance)`: the citizen's own value for
-that leg when they overrode the lookup, otherwise the submission-level `barn_distance_til_skole_api`. This
-precedence is the opposite of `FIELD_SOURCES` — here the manual value is the correction and wins; there MitID is
-the verified source and wins. Distances are one-way per leg, matching `BevilgetKoereAfstand`.
+### The klub leg is detected, not priced
 
-`MANUAL_DISTANCE_SOURCES` maps each leg to every field name that override has had. The form has been through
-several shapes and submissions made under an older one can still be sitting at `status = 'New'`, so all of them
-are accepted: `distance_hjem_og_skole_manuelt_indtastet` (one value for both directions),
-`distance_til_skole_manuelt_indtastet` / `distance_til_hjem_manuelt_indtastet` (a value per direction) and
-`distance_manuelt_indtastet`. Resolution is per leg precisely because the per-direction shape can differ
-between the two.
+`fra_klub_til_hjem` is a third leg the form can carry. Nothing knows which bevilling grants it or what distance
+it is paid at, so `process_submission` sends any submission claiming one to manual handling rather than
+validating it. That is deliberate: the alternative is paying the school legs and dropping the klub one in
+silence, which underpays the citizen with nothing on the sheet to show it. Remove the guard only once the klub
+leg can actually be priced.
 
 ### Multiple bevillinger on one date
 
@@ -148,6 +157,10 @@ submitted date counts as claimed. So the check is deliberately not gated on `is_
 
 Reported distance is only ever used to *flag* an over-claim. The amount in `process_submission` is
 `valid_legs × bevilling["allowed_distance"] × takst`, always computed from the granted distance.
+
+No rejected row may reach the sheet with an empty `evt_kommentar` — a reviewer cannot act on a blank reason.
+`process_submission` backstops this: if nothing validated and no comment was produced along the way, it says so
+explicitly. Every silent-rejection bug this robot has had showed up first as an empty comment.
 
 `beloeb_i_alt` is no longer a form field — the form stopped showing the citizen a predicted amount — so
 `build_final_row` writes the robot's own calculation into it for every submission. Its `beloeb` parameter

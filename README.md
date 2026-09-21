@@ -89,11 +89,14 @@ A local `.env` file is picked up automatically.
    is unchanged: it repeats the same figure, but only on submissions that were approved with a correction, so a
    reviewer can see at a glance which rows were adjusted.
 
-   Each entry in `koerselsliste` is a date on which the citizen ticks off whether they drove to school
-   (`til_skole`), home again (`til_hjem`), or both. The distance is not part of the tick-off: it is looked up
-   automatically into `barn_distance_til_skole_api`, and the citizen can override it per date in
-   `distance_manuelt_indtastet` when the lookup is wrong or missing. The manual value wins when both are
-   present. Both distances are one-way, per leg, matching `BevilgetKoereAfstand` on the bevilling.
+   Each entry in `koerselsliste` is a date, with one leg to school and one home again. The current form asks
+   the citizen to type the distance for each leg they drove, so a value present means that leg happened and a
+   blank one means it did not. Older versions of the form instead ticked the legs off and looked the distance
+   up automatically into `barn_distance_til_skole_api`; those still work, since submissions made under them can
+   still be waiting to be processed. Distances are one-way, per leg, matching `BevilgetKoereAfstand`.
+
+   A third leg, `fra_klub_til_hjem`, is recognised but cannot yet be priced — no bevilling says what a klub
+   trip is granted at. Any submission claiming one goes to manual handling rather than being part-paid.
 
    `barn_distance_til_skole_api` is carried into the Excel as its own column so a reviewer can see the distance
    a violation was judged against; a per-date override is visible inside the `koerselsliste` column.

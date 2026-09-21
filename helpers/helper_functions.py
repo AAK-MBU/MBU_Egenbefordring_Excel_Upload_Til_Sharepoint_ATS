@@ -321,6 +321,13 @@ def process_submission(sub, connection_string, befordrings_query):
     # Distance looked up automatically for the child; each entry may override it.
     api_distance = convert_value_to_float(data.get("barn_distance_til_skole_api"))
 
+    # Nothing knows what a klub leg is granted or priced at, so a submission
+    # claiming one cannot be settled automatically. Better a visible manual
+    # check than paying the school legs and dropping the klub one in silence.
+    klub_koersel = any(
+        is_leg_driven(entry, "fra_klub_til_hjem") for entry in koerselsliste
+    )
+
     if not barnets_cpr:
         return build_final_row(
             data=data,
@@ -378,8 +385,8 @@ def process_submission(sub, connection_string, befordrings_query):
             # A blank repeat row carries no date and nothing to pay out. Only
             # worth reporting when the citizen actually ticked a leg on it,
             # since that is driving we cannot match to a bevilling.
-            if is_checked(entry.get("til_skole")) or is_checked(
-                entry.get("til_hjem")
+            if is_leg_driven(entry, "til_skole") or is_leg_driven(
+                entry, "til_hjem"
             ):
                 entries_without_date = True
             continue
@@ -488,6 +495,19 @@ def process_submission(sub, connection_string, befordrings_query):
     comments = []
 
     # 🚫 Hard rejection cases
+    if klub_koersel:
+        comments.append(
+            "Kørsel fra klub til hjem kan ikke behandles automatisk"
+        )
+        return build_final_row(
+            data=data,
+            form_id=form_id,
+            modtagelsesdato=modtagelsesdato,
+            submission_valid=False,
+            aendret_beloeb="",
+            kommentar="; ".join(comments),
+        )
+
     if bevilling_kommentar:
         comments.append(
             f"Bevillingen har en kommentar og skal behandles manuelt: {bevilling_kommentar}"
@@ -574,6 +594,12 @@ def process_submission(sub, connection_string, befordrings_query):
         )
 
     submission_valid = total_valid_legs > 0
+
+    # Never hand a reviewer a rejected row with no reason on it.
+    if not submission_valid and not comments:
+        comments.append(
+            "Der er ikke indberettet kørsel på nogen af de angivne datoer"
+        )
 
     beloeb = round(total_beloeb, 2)
 
@@ -751,54 +777,117 @@ def is_checked(value) -> bool:
     return str(value).strip().lower() in {"1", "true", "ja", "x", "on"}
 
 
-# Where a koerselsliste entry carries the citizen's own distance for a leg.
-# The form has been through several shapes and submissions made under an
-# older one can still be waiting with status 'New', so every known field
-# name is accepted, most recent first. Older shapes gave each direction its
-# own field; newer ones use one home-school value for both.
-MANUAL_DISTANCE_SOURCES = {
-    "til_skole": [
-        "distance_hjem_og_skole_manuelt_indtastet",
-        "distance_til_skole_manuelt_indtastet",
-        "distance_manuelt_indtastet",
-    ],
-    "til_hjem": [
-        "distance_hjem_og_skole_manuelt_indtastet",
-        "distance_til_hjem_manuelt_indtastet",
-        "distance_manuelt_indtastet",
-    ],
+# How to read one leg of a koerselsliste entry. The form has been through
+# several shapes and submissions made under an older one can still be
+# waiting with status 'New', so every known field name is accepted, most
+# recent first.
+#
+# "checkbox" are the tick-off fields older shapes used to say a leg was
+# driven. The current shape has none: the citizen types a distance per leg
+# and fills one in only for a leg they actually drove, so the presence of a
+# distance is what says it happened.
+LEG_SOURCES = {
+    "til_skole": {
+        "checkbox": ["til_skole"],
+        "distance": [
+            "distance_koert_til_skole",
+            "distance_hjem_og_skole_manuelt_indtastet",
+            "distance_til_skole_manuelt_indtastet",
+            "distance_manuelt_indtastet",
+        ],
+    },
+    "til_hjem": {
+        "checkbox": ["til_hjem"],
+        "distance": [
+            "distance_koert_fra_skole_til_hjem",
+            "distance_hjem_og_skole_manuelt_indtastet",
+            "distance_til_hjem_manuelt_indtastet",
+            "distance_manuelt_indtastet",
+        ],
+    },
+    # Detected only. Nothing prices a klub leg yet - see process_submission.
+    "fra_klub_til_hjem": {
+        "checkbox": ["fra_klub_til_hjem"],
+        "distance": [
+            "distance_koert_fra_klub_til_hjem",
+            "distance_hjem_og_klub_manuelt_indtastet",
+        ],
+    },
 }
+
+
+def get_reported_distance(entry: dict, leg: str) -> float | None:
+    """
+    The distance the citizen themselves gave for one leg of one date.
+
+    Args:
+        entry (dict): One entry from koerselsliste.
+        leg (str): Which leg, a key of LEG_SOURCES.
+
+    Returns:
+        float | None: Their value, or None if they gave none.
+
+    Raises:
+        KeyError: If the leg name is unknown.
+    """
+
+    for field in LEG_SOURCES[leg]["distance"]:
+        distance = convert_value_to_float(entry.get(field))
+
+        if distance is not None and distance > 0:
+            return distance
+
+    return None
+
+
+def is_leg_driven(entry: dict, leg: str) -> bool:
+    """
+    Decide whether the citizen drove one leg of one date.
+
+    Shapes carrying a tick-off field are answered by it, even when it is
+    unticked. Shapes without one say it with the distance: a value is
+    filled in only for a leg that was driven.
+
+    The automatically looked-up distance is deliberately not consulted -
+    it exists for every child on every date and would make every leg of
+    every date read as driven.
+
+    Args:
+        entry (dict): One entry from koerselsliste.
+        leg (str): Which leg, a key of LEG_SOURCES.
+
+    Returns:
+        bool: True if the leg was driven.
+    """
+
+    for field in LEG_SOURCES[leg]["checkbox"]:
+        if field in entry:
+            return is_checked(entry.get(field))
+
+    return get_reported_distance(entry, leg) is not None
 
 
 def get_entry_distance(
     entry: dict, leg: str, api_distance: float | None
 ) -> float | None:
     """
-    Resolve the reported one-way distance for one leg of one date.
+    Resolve the distance to judge one leg of one date against.
 
-    The distance is normally looked up automatically, but the citizen can
-    type it in per date when the lookup is wrong or missing, so a manually
-    entered value takes precedence.
+    The citizen's own value wins; the automatic lookup is the fallback for
+    shapes where they were not asked for one.
 
     Args:
         entry (dict): One entry from koerselsliste.
-        leg (str): Which leg, a key of MANUAL_DISTANCE_SOURCES.
+        leg (str): Which leg, a key of LEG_SOURCES.
         api_distance (float | None): Automatically retrieved distance.
 
     Returns:
         float | None: Distance to use, or None if no source has one.
-
-    Raises:
-        KeyError: If the leg name is unknown.
     """
 
-    for field in MANUAL_DISTANCE_SOURCES[leg]:
-        manual = convert_value_to_float(entry.get(field))
+    reported = get_reported_distance(entry, leg)
 
-        if manual is not None and manual > 0:
-            return manual
-
-    return api_distance
+    return api_distance if reported is None else reported
 
 
 def validate_entries(
@@ -835,7 +924,7 @@ def validate_entries(
 
     for entry in entries:
         is_valid, is_wrong, distance_violation, example = validate_leg(
-            is_checked(entry.get("til_skole")),
+            is_leg_driven(entry, "til_skole"),
             allowed_morgen,
             get_entry_distance(entry, "til_skole", api_distance),
             allowed_distance,
@@ -849,7 +938,7 @@ def validate_entries(
             distance_example = example
 
         is_valid, is_wrong, distance_violation, example = validate_leg(
-            is_checked(entry.get("til_hjem")),
+            is_leg_driven(entry, "til_hjem"),
             allowed_efter,
             get_entry_distance(entry, "til_hjem", api_distance),
             allowed_distance,
