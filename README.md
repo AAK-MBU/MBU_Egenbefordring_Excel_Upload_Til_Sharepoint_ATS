@@ -32,7 +32,8 @@ No process arguments. Configuration comes from environment variables:
 | Variable | Purpose |
 | --- | --- |
 | `ATS_URL`, `ATS_TOKEN` | Automation Server API |
-| `DBCONNECTIONSTRINGPROD` | SQL Server connection string |
+| `DBCONNECTIONSTRINGPROD` | RPA database — the submissions |
+| `DBCONNECTIONSTRINGBEFORDRING` | Befordringssystemet — the bevillinger validated against |
 | `TENANT`, `CLIENT_ID`, `APPREG_THUMBPRINT`, `GRAPH_CERT_PEM` | SharePoint certificate authentication |
 
 A local `.env` file is picked up automatically.
@@ -44,7 +45,7 @@ A local `.env` file is picked up automatically.
    (`Egenbefordring_<uge>_<ddmmyyyy>_<ddmmyyyy>`) doubles as the queue reference, so re-running `--queue` for a week
    that is already queued adds nothing.
 
-2. **Export** — Reads submissions from `[RPA].[journalizing].[view_Journalizing]` where
+2. **Export** — Reads submissions from `[RPA].[journalizing].[view_Journalizing]` (RPA database) where
    `form_type = 'indberetning_af_egenbefordring'` and `status = 'New'` within the date range.
 
    The form delivers several values from more than one source: fields suffixed `_mitid` are prefilled from the
@@ -55,8 +56,22 @@ A local `.env` file is picked up automatically.
    `adresse_der_blev_koert_til_fra` is always filled in by the current form. It falls back to `barnets_adresse`
    only to cover submissions made before the field existed, which can still be waiting with `status = 'New'`.
 
-3. **Validate** — Each submission is matched against the child's bevillinger in `[RPA].[rpa].[BefordringsData]`
-   (`BevillingAfKoerselstype = 'Egenbefordring'`), per driving date:
+3. **Validate** — Each submission is matched against the child's bevillinger in **Befordringssystemet**
+   (`DBCONNECTIONSTRINGBEFORDRING`), per driving date. The grant lives on the *kørselsrække*, not the
+   bevilling: each række carries its own validity period, time of day, granted distance and weekdays, and a
+   bevilling can hold several. The query therefore returns one row per række.
+
+   This replaced `[RPA].[rpa].[BefordringsData]`, which flattened that detail away. Three things became
+   checkable as a result:
+
+   - **Ugedage** — `Koersel_Ugedag_LINK` records which days were granted. The old table had no equivalent, so a
+     claim for a day nobody granted was simply paid. `Alle` means Monday–Friday; there is no Lørdag or Søndag in
+     the lookup, so no kørselsrække can grant a weekend.
+   - **Tidspunkt** — a lookup value instead of free text, so morgen/eftermiddag no longer has to be
+     substring-matched out of whatever a caseworker typed.
+   - **Gyldighed** — per kørselsrække, so a date is matched against the period that actually grants it.
+
+   Per driving date:
 
    - **Sent to manual handling** (`godkendt` = false, reason in `evt_kommentar`) when the bevilling covering the
      claimed dates has anything written in its `Kommentar` column. A case worker only writes there when
@@ -76,6 +91,11 @@ A local `.env` file is picked up automatically.
      submission goes to manual handling — there is no way to tell which one the citizen drove under. So does a
      bevilling whose `TidspunktForBevilling` reads as neither morgen nor eftermiddag, since it grants nothing
      and cannot safely be ignored.
+   - **Sent to manual handling** when driving is reported on a weekday the bevilling does not grant. The dates
+     are listed in `evt_kommentar`. Deliberately NOT an automatic rejection: it is the newest rule in the robot
+     and the expensive mistake is refusing a citizen money they are owed, so the first version only tells a
+     human where to look. A bevilling with no weekdays recorded — every one converted from the old data — is
+     not checked at all, since treating "not recorded" as "nothing granted" would reject all of them.
    - **Approved with adjustment** (`aendret_beloeb_i_alt` set, reason in `evt_kommentar`) when morning/afternoon
      driving was reported outside what was granted, the reported distance exceeds the granted km, or some dates
      fall outside the active bevillinger.

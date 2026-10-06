@@ -162,6 +162,7 @@ def export_egenbefordring_from_hub(
     start_date: str = "",
     end_date: str = "",
     sheet_name: str = "",
+    befordring_connection_string: str = "",
 ):
     """
     Export egenbefordring submissions to an Excel file.
@@ -173,10 +174,12 @@ def export_egenbefordring_from_hub(
     - Outputs a structured Excel sheet in a fixed column order
 
     Args:
-        connection_string (str): SQL Server connection string.
+        connection_string (str): RPA database, where the submissions live.
         start_date (str): Start of date filter (inclusive).
         end_date (str): End of date filter (inclusive).
         sheet_name (str): Name of the Excel worksheet.
+        befordring_connection_string (str): Befordringssystemet, where the
+            bevillinger live. Two databases, so two connection strings.
 
     Returns:
         bytes: Binary Excel file contents.
@@ -203,24 +206,63 @@ def export_egenbefordring_from_hub(
             AND status = 'New'
     """
 
+    # Bevillinger come from Befordringssystemet, not from the old
+    # [RPA].[rpa].[BefordringsData] export.
+    #
+    # The grant lives on the KØRSELSRÆKKE, not the bevilling: each række
+    # carries its own validity period, time of day, granted distance and
+    # weekdays, and a bevilling can hold several of them. That is the detail
+    # the old table flattened away, and it is why this query returns one row
+    # per række rather than per bevilling.
+    #
+    # What the new source makes checkable that the old one could not:
+    #
+    #   ugedage          Koersel_Ugedag_LINK records which days were granted.
+    #                    BefordringsData had no equivalent, so a claim for a
+    #                    day nobody granted was simply paid.
+    #   tidspunkt        a lookup value rather than free text, so "morgen" and
+    #                    "eftermiddag" no longer have to be substring-matched
+    #                    out of whatever a caseworker typed.
+    #   gyldighed        per række, so a date is matched against the period
+    #                    that actually grants it.
+    #
+    # STRING_AGG for the weekdays keeps this one row per række; splitting the
+    # link table out would multiply the rows and the Python side would have to
+    # regroup them.
     befordrings_query = """
         SELECT
-            CPR,
-            BevilgetKoereAfstand,
-            TidspunktForBevilling,
-            ElevensAdresse,
-            SkoleNavnBefordring,
-            SkolensAdresse,
-            BevillingFra,
-            BevillingTil,
-            Kommentar
-        FROM
-            [RPA].[rpa].[BefordringsData]
+            b.cpr_elev                                          AS CPR,
+            k.bevilget_koereafstand_pr_vej                      AS BevilgetKoereAfstand,
+            t.tidspunkt_tekst                                   AS TidspunktForBevilling,
+            ba.adresse_tekst                                    AS ElevensAdresse,
+            COALESCE(sm.matrikel_navn, uu.ungdomsuddannelse_navn)     AS SkoleNavnBefordring,
+            COALESCE(sm.matrikel_adresse, uu.ungdomsuddannelse_adresse) AS SkolensAdresse,
+            k.gyldig_fra                                        AS BevillingFra,
+            k.gyldig_til                                        AS BevillingTil,
+            k.kommentar                                         AS Kommentar,
+            (
+                SELECT STRING_AGG(u.dag_tekst, ',')
+                FROM   [befordring].[Koersel_Ugedag_LINK] kul
+                JOIN   [befordring].[Ugedag] u ON u.dag_id = kul.dag_id
+                WHERE  kul.koersel_id = k.koersel_id
+            )                                                   AS Ugedage
+        FROM       [befordring].[Koersel]          k
+        INNER JOIN [befordring].[Bevilling]        b  ON b.bevilling_id        = k.bevilling_id
+        INNER JOIN [befordring].[Befordringstype]  bt ON bt.befordringstype_id = k.befordringstype_id
+        LEFT JOIN  [befordring].[Tidspunkt]        t  ON t.tidspunkt_id        = k.tidspunkt_id
+        LEFT JOIN  [befordring].[Adresse]          ba ON ba.adresse_id         = b.adresse_id
+        LEFT JOIN  [befordring].[Skolematrikel]    sm ON sm.matrikel_id        = b.matrikel_id
+        LEFT JOIN  [befordring].[Ungdomsuddannelse] uu ON uu.ungdomsuddannelse_id = b.ungdomsuddannelse_id
         WHERE
-            CPR = ?
-            AND BevillingAfKoerselstype = 'Egenbefordring'
+            b.cpr_elev = ?
+            /* Compared without spaces because the lookup is not consistent
+               about them - the same reason $lib/koerselstype folds them. */
+            AND REPLACE(bt.befordringstype_tekst, ' ', '') = 'Egenbefordring'
+            /* Soft-deleted rows on either side grant nothing. */
+            AND k.aktiv = 1
+            AND b.aktiv = 1
         ORDER BY
-            BevillingFra
+            k.gyldig_fra
     """
 
     submissions = get_items_from_query_with_params(
@@ -235,7 +277,7 @@ def export_egenbefordring_from_hub(
         final_rows.append(
             process_submission(
                 sub=sub,
-                connection_string=connection_string,
+                connection_string=befordring_connection_string or connection_string,
                 befordrings_query=befordrings_query,
             )
         )
@@ -302,7 +344,9 @@ def process_submission(sub, connection_string, befordrings_query):
 
     Args:
         sub (dict): Submission row from journalizing.
-        connection_string (str): SQL Server connection string.
+        connection_string (str): Befordringssystemet connection string — the
+            bevillinger are read from there, not from the RPA database the
+            submission itself came from.
         befordrings_query (str): SQL query to fetch bevilling data.
 
     Returns:
@@ -377,6 +421,9 @@ def process_submission(sub, connection_string, befordrings_query):
     entries_without_date = False
     unreadable_tidspunkt = False
     bevilling_kommentar = None
+    # Dates driven on a weekday the bevilling does not grant. Collected rather
+    # than breaking out, so the reviewer sees every one of them at once.
+    ugedag_afvigelser = []
 
     for entry in koerselsliste:
         entry_date = parse_entry_date(entry.get("dato"))
@@ -391,23 +438,42 @@ def process_submission(sub, connection_string, befordrings_query):
                 entries_without_date = True
             continue
 
-        matches = find_bevillinger_for_date(bevillinger, entry_date)
+        # Everything covering the date, before narrowing by weekday. The
+        # comment check runs on this wider set: a caseworker's note on ANY
+        # række covering the day is worth stopping for, whether or not that
+        # række grants the day itself.
+        daekkende = find_bevillinger_for_date(bevillinger, entry_date)
 
-        if not matches:
+        if not daekkende:
             out_of_bevilling_dates = True
             continue
 
         # A case worker only writes in Kommentar when something about the
         # bevilling needs saying, so the row is never auto-approved.
-        kommenterede = [m for m in matches if str(m.get("kommentar") or "").strip()]
+        kommenterede = [m for m in daekkende if str(m.get("kommentar") or "").strip()]
 
         if kommenterede:
             bevilling_kommentar = str(kommenterede[0]["kommentar"]).strip()
             break  # 🚫 immediate hard stop
 
-        # allowed_morgen / allowed_efter come from substring-matching
-        # TidspunktForBevilling. A value matching neither grants nothing, so
-        # merging would drop the row silently - including its distance.
+        # Narrowed to the rækker that grant THIS weekday. A student can hold
+        # several kørselsrækker at once — Monday/Tuesday on one, Wednesday/
+        # Thursday on another — and each date has to be judged against the one
+        # that actually grants it. Resolving before narrowing made every such
+        # student look like a conflict.
+        matches = raekker_for_dato(bevillinger, entry_date)
+
+        if not matches:
+            # The date is inside a bevilling's period but on a weekday none of
+            # them grants. Collected rather than breaking, so the reviewer
+            # sees every such date at once, and routed to manual handling
+            # rather than rejected — see the ugedag_afvigelser block below.
+            ugedag_afvigelser.append(entry_date)
+            continue
+
+        # tidspunkt comes from a lookup now, so this can only fire on a
+        # kørselsrække with no tidspunkt at all. Such a række grants nothing,
+        # and merging it would drop the row silently - including its distance.
         if any(not m["allowed_morgen"] and not m["allowed_efter"] for m in matches):
             unreadable_tidspunkt = True
             break  # 🚫 immediate hard stop
@@ -419,6 +485,11 @@ def process_submission(sub, connection_string, befordrings_query):
             break  # 🚫 immediate hard stop
 
         found_any_valid_bevilling = True
+
+        # Morning and afternoon are the UNION across the rækker granting this
+        # day: one række may grant the trip to school and another the trip
+        # home. Taking either alone would reject half the driving.
+        allowed_morgen_dagen, allowed_efter_dagen = tidspunkter_for_dato(matches)
 
         adresse_paa_fundet_bevilling = normalize_address(bevilling.get("bevilget_addresse"))
 
@@ -471,8 +542,8 @@ def process_submission(sub, connection_string, befordrings_query):
 
         validation = validate_entries(
             entries=[entry],
-            allowed_morgen=bevilling["allowed_morgen"],
-            allowed_efter=bevilling["allowed_efter"],
+            allowed_morgen=allowed_morgen_dagen,
+            allowed_efter=allowed_efter_dagen,
             allowed_distance=bevilling["allowed_distance"],
             api_distance=api_distance,
         )
@@ -524,6 +595,20 @@ def process_submission(sub, connection_string, befordrings_query):
     if unreadable_tidspunkt:
         comments.append(
             "Bevillingens tidspunkt er hverken morgen eller eftermiddag"
+        )
+        return build_final_row(
+            data=data,
+            form_id=form_id,
+            modtagelsesdato=modtagelsesdato,
+            submission_valid=False,
+            aendret_beloeb="",
+            kommentar="; ".join(comments),
+        )
+
+    if ugedag_afvigelser:
+        datoer = ", ".join(d.strftime("%d-%m-%Y") for d in sorted(set(ugedag_afvigelser)))
+        comments.append(
+            f"Der er indberettet kørsel på ugedage, bevillingen ikke dækker: {datoer}"
         )
         return build_final_row(
             data=data,
@@ -659,10 +744,91 @@ def normalize_bevillinger(rows):
                 "skolens_adresse": r.get("SkolensAdresse"),
                 "bevilget_addresse": r.get("ElevensAdresse"),
                 "kommentar": r.get("Kommentar"),
+                "allowed_ugedage": parse_ugedage(r.get("Ugedage")),
             }
         )
 
     return bevillinger
+
+
+# Weekday numbers as date.weekday() gives them: Monday is 0.
+UGEDAG_NUMRE = {
+    "mandag": 0,
+    "tirsdag": 1,
+    "onsdag": 2,
+    "torsdag": 3,
+    "fredag": 4,
+}
+
+# "Alle" in the Ugedag lookup is described as "Alle hverdage" — Monday to
+# Friday, not literally every day. There is no Lørdag or Søndag in the table
+# at all, so no kørselsrække can ever grant a weekend.
+ALLE_HVERDAGE = frozenset(UGEDAG_NUMRE.values())
+
+
+def parse_ugedage(value) -> frozenset:
+    """
+    The weekday numbers a kørselsrække grants.
+
+    Args:
+        value: Comma-separated Danish weekday names, as the query aggregates
+            them, or None.
+
+    Returns:
+        frozenset[int]: Weekday numbers, Monday = 0.
+
+        An EMPTY set means "no weekdays recorded", which is not the same as
+        "no weekdays granted" — see weekday_mismatch, which treats it as
+        unknown and checks nothing rather than rejecting everything.
+    """
+
+    if not value:
+        return frozenset()
+
+    numre = set()
+
+    for navn in str(value).split(","):
+        nøgle = navn.strip().lower()
+
+        if nøgle == "alle":
+            numre |= ALLE_HVERDAGE
+        elif nøgle in UGEDAG_NUMRE:
+            numre.add(UGEDAG_NUMRE[nøgle])
+
+    return frozenset(numre)
+
+
+def weekday_mismatch(bevilling, d) -> bool:
+    """
+    Whether a driving date falls on a weekday the bevilling does not grant.
+
+    Args:
+        bevilling (dict): A normalized bevilling.
+        d (date): The date driven.
+
+    Returns:
+        bool: True when the day is outside the granted weekdays.
+
+    Notes:
+        A bevilling with NO weekdays recorded answers False. Every bevilling
+        converted from the old data lacks them, and treating "not recorded" as
+        "nothing granted" would reject every one of those claims — which is
+        the opposite of what this check is for.
+
+        A mismatch is NEVER an automatic rejection. It routes the submission
+        to manual handling with the reason spelled out, because this is the
+        first rule in the robot derived from data nobody has validated at
+        scale, and the cost of being wrong is refusing a citizen money they
+        are owed. Once the reviewers have seen how often it fires, and on
+        what, it can be tightened.
+    """
+
+    granted = bevilling.get("allowed_ugedage") or frozenset()
+
+    if not granted:
+        return False
+
+    return d.weekday() not in granted
 
 
 def find_bevillinger_for_date(bevillinger, d):
@@ -691,6 +857,20 @@ def bevilling_values(bevilling) -> tuple:
     say different things. Date ranges are excluded: two rows covering the
     same date with otherwise identical values grant the same thing.
 
+    TIME OF DAY is excluded too, and weekdays were never in here. A student
+    legitimately holds several kørselsrækker at once — morning on Monday and
+    Tuesday, afternoon on Wednesday and Thursday, both on Friday — and those
+    are three different grants, not three conflicting ones. Comparing the time
+    flags made every such student a conflict, and the whole submission went to
+    manual handling every week.
+
+    What is left is what genuinely cannot be reconciled: two rows covering the
+    same day that disagree about the distance, the school or the address. There
+    is no way to tell which one the citizen drove under.
+
+    The time flags are instead UNIONED across the rækker that grant the day —
+    see tidspunkter_for_dato.
+
     Args:
         bevilling (dict): A normalized bevilling.
 
@@ -699,8 +879,6 @@ def bevilling_values(bevilling) -> tuple:
     """
 
     return (
-        bevilling["allowed_morgen"],
-        bevilling["allowed_efter"],
         bevilling["allowed_distance"],
         norm(bevilling.get("bevilget_skole")),
         normalize_address(bevilling.get("bevilget_addresse")),
@@ -1247,3 +1425,55 @@ def normalize_address(value) -> str:
         number += suffix_match.group(1)
 
     return street + number
+
+
+def raekker_for_dato(bevillinger, d):
+    """
+    The kørselsrækker that grant driving on a given date.
+
+    Args:
+        bevillinger (list[dict]): Normalized bevillinger.
+        d (date): The date driven.
+
+    Returns:
+        list[dict]: Rækker covering the date AND granting its weekday.
+
+    Notes:
+        Narrowing by weekday BEFORE anything else is what makes a split week
+        work. A student with Monday/Tuesday on one række and Wednesday/
+        Thursday on another has two grants, not a conflict — but only if each
+        date is judged against the række that actually grants it.
+
+        A række with no weekdays recorded is kept for every day. Those are the
+        bevillinger converted from the old data, where the information simply
+        does not exist; excluding them would reject every claim against one.
+    """
+
+    return [
+        b
+        for b in find_bevillinger_for_date(bevillinger, d)
+        if not weekday_mismatch(b, d)
+    ]
+
+
+def tidspunkter_for_dato(raekker) -> tuple[bool, bool]:
+    """
+    Whether morning and afternoon driving is granted on a date.
+
+    Args:
+        raekker (list[dict]): The rækker granting that date.
+
+    Returns:
+        tuple[bool, bool]: (morgen, eftermiddag).
+
+    Notes:
+        A UNION, not a single række's value. Where one række grants the
+        morning leg and another the afternoon one on the same day, the
+        citizen is granted both — taking either row alone would reject half
+        the driving they were entitled to.
+    """
+
+    return (
+        any(b["allowed_morgen"] for b in raekker),
+        any(b["allowed_efter"] for b in raekker),
+    )
