@@ -337,7 +337,8 @@ def process_submission(sub, connection_string, befordrings_query):
     - Loads submission data and reported driving entries
     - Matches each entry to active bevillinger by date
     - Rejects overlapping or invalid bevillinger
-    - Validates school, address, time-of-day, and distance rules
+    - Validates school, address, time-of-day, and distance rules against
+      the granted koerselsraekker in Befordringssystemet
     - Calculates adjusted reimbursement when applicable
 
     The function returns a single flattened row suitable for Excel export.
@@ -362,9 +363,6 @@ def process_submission(sub, connection_string, befordrings_query):
     barnets_cpr = get_form_field(data, "cpr_nummer_barn")
     koerselsliste = data.get("koerselsliste", [])
 
-    # Distance looked up automatically for the child; each entry may override it.
-    api_distance = convert_value_to_float(data.get("barn_distance_til_skole_api"))
-
     # Nothing knows what a klub leg is granted or priced at, so a submission
     # claiming one cannot be settled automatically. Better a visible manual
     # check than paying the school legs and dropping the klub one in silence.
@@ -378,7 +376,6 @@ def process_submission(sub, connection_string, befordrings_query):
             form_id=form_id,
             modtagelsesdato=modtagelsesdato,
             submission_valid=False,
-            aendret_beloeb="",
             kommentar="Barnets CPR-nummer mangler i indberetningen",
         )
 
@@ -401,7 +398,6 @@ def process_submission(sub, connection_string, befordrings_query):
             form_id=form_id,
             modtagelsesdato=modtagelsesdato,
             submission_valid=False,
-            aendret_beloeb="",
             kommentar="Ingen aktiv bevilling fundet",
         )
 
@@ -506,7 +502,6 @@ def process_submission(sub, connection_string, befordrings_query):
                 form_id=form_id,
                 modtagelsesdato=modtagelsesdato,
                 submission_valid=False,
-                aendret_beloeb="",
                 kommentar="Barnets skole forekommer ikke af bevilling",
             )
 
@@ -516,7 +511,6 @@ def process_submission(sub, connection_string, befordrings_query):
                 form_id=form_id,
                 modtagelsesdato=modtagelsesdato,
                 submission_valid=False,
-                aendret_beloeb="",
                 kommentar="Barnets adresse forekommer ikke af bevilling",
             )
 
@@ -526,7 +520,6 @@ def process_submission(sub, connection_string, befordrings_query):
                 form_id=form_id,
                 modtagelsesdato=modtagelsesdato,
                 submission_valid=False,
-                aendret_beloeb="",
                 kommentar="Indberettet skole matcher ikke barnets bevilling",
             )
 
@@ -536,7 +529,6 @@ def process_submission(sub, connection_string, befordrings_query):
                 form_id=form_id,
                 modtagelsesdato=modtagelsesdato,
                 submission_valid=False,
-                aendret_beloeb="",
                 kommentar="Indberettet adresse matcher ikke barnets bevilling",
             )
 
@@ -545,7 +537,6 @@ def process_submission(sub, connection_string, befordrings_query):
             allowed_morgen=allowed_morgen_dagen,
             allowed_efter=allowed_efter_dagen,
             allowed_distance=bevilling["allowed_distance"],
-            api_distance=api_distance,
         )
 
         if validation["wrong_morgen"]:
@@ -575,7 +566,6 @@ def process_submission(sub, connection_string, befordrings_query):
             form_id=form_id,
             modtagelsesdato=modtagelsesdato,
             submission_valid=False,
-            aendret_beloeb="",
             kommentar="; ".join(comments),
         )
 
@@ -588,7 +578,6 @@ def process_submission(sub, connection_string, befordrings_query):
             form_id=form_id,
             modtagelsesdato=modtagelsesdato,
             submission_valid=False,
-            aendret_beloeb="",
             kommentar="; ".join(comments),
         )
 
@@ -601,7 +590,6 @@ def process_submission(sub, connection_string, befordrings_query):
             form_id=form_id,
             modtagelsesdato=modtagelsesdato,
             submission_valid=False,
-            aendret_beloeb="",
             kommentar="; ".join(comments),
         )
 
@@ -615,7 +603,6 @@ def process_submission(sub, connection_string, befordrings_query):
             form_id=form_id,
             modtagelsesdato=modtagelsesdato,
             submission_valid=False,
-            aendret_beloeb="",
             kommentar="; ".join(comments),
         )
 
@@ -629,7 +616,6 @@ def process_submission(sub, connection_string, befordrings_query):
             form_id=form_id,
             modtagelsesdato=modtagelsesdato,
             submission_valid=False,
-            aendret_beloeb="",
             kommentar="; ".join(comments),
         )
 
@@ -647,7 +633,6 @@ def process_submission(sub, connection_string, befordrings_query):
             form_id=form_id,
             modtagelsesdato=modtagelsesdato,
             submission_valid=False,
-            aendret_beloeb="",
             kommentar="; ".join(comments),
         )
 
@@ -686,21 +671,13 @@ def process_submission(sub, connection_string, befordrings_query):
             "Der er ikke indberettet kørsel på nogen af de angivne datoer"
         )
 
-    beloeb = round(total_beloeb, 2)
-
-    if submission_valid and comments:
-        aendret_beloeb = beloeb
-    else:
-        aendret_beloeb = ""
-
     return build_final_row(
         data=data,
         form_id=form_id,
         modtagelsesdato=modtagelsesdato,
         submission_valid=submission_valid,
-        aendret_beloeb=aendret_beloeb,
         kommentar="; ".join(comments),
-        beloeb=beloeb,
+        beloeb=round(total_beloeb, 2),
     )
 
 
@@ -937,66 +914,45 @@ def parse_entry_date(value):
         return None
 
 
-def is_checked(value) -> bool:
-    """
-    Determine whether a checkbox-style form value is ticked.
-
-    The form reports a driven leg as "1" and an undriven one as an empty
-    value. Anything unrecognised counts as not driven, so an unexpected
-    value can never inflate a reimbursement.
-
-    Args:
-        value (any): Raw value from the form.
-
-    Returns:
-        bool: True if the box is ticked.
-    """
-
-    return str(value).strip().lower() in {"1", "true", "ja", "x", "on"}
-
-
-# How to read one leg of a koerselsliste entry. The form has been through
-# several shapes and submissions made under an older one can still be
-# waiting with status 'New', so every known field name is accepted, most
-# recent first.
+# Which form fields carry the distance for one leg of a koerselsliste entry.
 #
-# "checkbox" are the tick-off fields older shapes used to say a leg was
-# driven. The current shape has none: the citizen types a distance per leg
-# and fills one in only for a leg they actually drove, so the presence of a
-# distance is what says it happened.
+# The citizen types a distance for every leg they drove and leaves the rest
+# blank, so the presence of a value is what says the leg happened and the
+# value itself is the claim. There is no tick-off field and no automatic
+# lookup in this decision: nothing the citizen did not type can put a leg on
+# the claim or set the km it is judged at.
+#
+# Several names per leg because the form asks differently depending on which
+# legs are being reported - one combined field when both legs were driven,
+# separate ones when only one was. First match wins.
 LEG_SOURCES = {
-    "til_skole": {
-        "checkbox": ["til_skole"],
-        "distance": [
-            "distance_koert_til_skole",
-            "distance_hjem_og_skole_manuelt_indtastet",
-            "distance_til_skole_manuelt_indtastet",
-            "distance_manuelt_indtastet",
-        ],
-    },
-    "til_hjem": {
-        "checkbox": ["til_hjem"],
-        "distance": [
-            "distance_koert_fra_skole_til_hjem",
-            "distance_hjem_og_skole_manuelt_indtastet",
-            "distance_til_hjem_manuelt_indtastet",
-            "distance_manuelt_indtastet",
-        ],
-    },
+    "til_skole": [
+        "distance_koert_til_skole",
+        "distance_hjem_og_skole_manuelt_indtastet",
+        "distance_til_skole_manuelt_indtastet",
+        "distance_manuelt_indtastet",
+    ],
+    "til_hjem": [
+        "distance_koert_fra_skole_til_hjem",
+        "distance_hjem_og_skole_manuelt_indtastet",
+        "distance_til_hjem_manuelt_indtastet",
+        "distance_manuelt_indtastet",
+    ],
     # Detected only. Nothing prices a klub leg yet - see process_submission.
-    "fra_klub_til_hjem": {
-        "checkbox": ["fra_klub_til_hjem"],
-        "distance": [
-            "distance_koert_fra_klub_til_hjem",
-            "distance_hjem_og_klub_manuelt_indtastet",
-        ],
-    },
+    "fra_klub_til_hjem": [
+        "distance_koert_fra_klub_til_hjem",
+        "distance_hjem_og_klub_manuelt_indtastet",
+    ],
 }
 
 
 def get_reported_distance(entry: dict, leg: str) -> float | None:
     """
     The distance the citizen themselves gave for one leg of one date.
+
+    This is the only distance the robot judges a leg by. The granted km
+    on the koerselsraekke in Befordringssystemet is what it is judged
+    against, and what the payout is calculated from.
 
     Args:
         entry (dict): One entry from koerselsliste.
@@ -1009,7 +965,7 @@ def get_reported_distance(entry: dict, leg: str) -> float | None:
         KeyError: If the leg name is unknown.
     """
 
-    for field in LEG_SOURCES[leg]["distance"]:
+    for field in LEG_SOURCES[leg]:
         distance = convert_value_to_float(entry.get(field))
 
         if distance is not None and distance > 0:
@@ -1022,13 +978,8 @@ def is_leg_driven(entry: dict, leg: str) -> bool:
     """
     Decide whether the citizen drove one leg of one date.
 
-    Shapes carrying a tick-off field are answered by it, even when it is
-    unticked. Shapes without one say it with the distance: a value is
-    filled in only for a leg that was driven.
-
-    The automatically looked-up distance is deliberately not consulted -
-    it exists for every child on every date and would make every leg of
-    every date read as driven.
+    The citizen fills in a distance only for a leg they actually drove, so
+    a value present is what says it happened.
 
     Args:
         entry (dict): One entry from koerselsliste.
@@ -1038,47 +989,17 @@ def is_leg_driven(entry: dict, leg: str) -> bool:
         bool: True if the leg was driven.
     """
 
-    for field in LEG_SOURCES[leg]["checkbox"]:
-        if field in entry:
-            return is_checked(entry.get(field))
-
     return get_reported_distance(entry, leg) is not None
 
 
-def get_entry_distance(
-    entry: dict, leg: str, api_distance: float | None
-) -> float | None:
-    """
-    Resolve the distance to judge one leg of one date against.
-
-    The citizen's own value wins; the automatic lookup is the fallback for
-    shapes where they were not asked for one.
-
-    Args:
-        entry (dict): One entry from koerselsliste.
-        leg (str): Which leg, a key of LEG_SOURCES.
-        api_distance (float | None): Automatically retrieved distance.
-
-    Returns:
-        float | None: Distance to use, or None if no source has one.
-    """
-
-    reported = get_reported_distance(entry, leg)
-
-    return api_distance if reported is None else reported
-
-
-def validate_entries(
-    entries, allowed_morgen, allowed_efter, allowed_distance, api_distance
-):
+def validate_entries(entries, allowed_morgen, allowed_efter, allowed_distance):
     """
     Validate reported driving entries for a single submission date.
 
-    Each entry ticks off which legs were driven that day; the distance is
-    taken from the automatic lookup unless the citizen overrode it for that
-    leg. Each leg is checked for:
+    Each entry carries the distance the citizen typed for each leg they
+    drove that day. Each such leg is checked for:
     - Allowed morning / afternoon driving
-    - Distance violations
+    - Distance violations against the granted km
 
     The function aggregates validation flags to support both
     hard rejections and adjustable corrections.
@@ -1088,7 +1009,6 @@ def validate_entries(
         allowed_morgen (bool): Whether morning driving is allowed.
         allowed_efter (bool): Whether afternoon driving is allowed.
         allowed_distance (float): Approved maximum distance per leg.
-        api_distance (float | None): Automatically retrieved distance.
 
     Returns:
         dict: Validation results and counters.
@@ -1104,7 +1024,7 @@ def validate_entries(
         is_valid, is_wrong, distance_violation, example = validate_leg(
             is_leg_driven(entry, "til_skole"),
             allowed_morgen,
-            get_entry_distance(entry, "til_skole", api_distance),
+            get_reported_distance(entry, "til_skole"),
             allowed_distance,
             distance_violation,
         )
@@ -1118,7 +1038,7 @@ def validate_entries(
         is_valid, is_wrong, distance_violation, example = validate_leg(
             is_leg_driven(entry, "til_hjem"),
             allowed_efter,
-            get_entry_distance(entry, "til_hjem", api_distance),
+            get_reported_distance(entry, "til_hjem"),
             allowed_distance,
             distance_violation,
         )
@@ -1188,7 +1108,6 @@ def build_final_row(
     form_id,
     modtagelsesdato,
     submission_valid,
-    aendret_beloeb,
     kommentar,
     beloeb=0.0,
 ):
@@ -1203,12 +1122,20 @@ def build_final_row(
     0.0 because a rejected submission pays out nothing, which also keeps
     any future rejection path from accidentally reporting an amount.
 
+    aendret_beloeb_i_alt is always left blank. The Udbetaling robot pays
+    it in preference to beloeb_i_alt whenever it holds a value, so it is
+    the caseworker's override and nothing else: a value this robot wrote
+    there would outrank a correction they made in beloeb_i_alt. It used
+    to carry this robot's own figure, back when beloeb_i_alt was the
+    amount the form predicted for the citizen - with the form no longer
+    predicting one, that figure belongs in beloeb_i_alt and there is no
+    second amount to report.
+
     Args:
         data (dict): Original form data.
         form_id (str): Submission UUID.
         modtagelsesdato (str): Submission timestamp.
         submission_valid (bool): Whether the submission is approved.
-        aendret_beloeb (float | str): Adjusted reimbursement amount.
         kommentar (str): Processing comments.
         beloeb (float): Calculated reimbursement amount.
 
@@ -1225,7 +1152,7 @@ def build_final_row(
     row["modtagelsesdato"] = modtagelsesdato
     row["uuid"] = form_id
     row["beloeb_i_alt"] = beloeb
-    row["aendret_beloeb_i_alt"] = aendret_beloeb
+    row["aendret_beloeb_i_alt"] = ""
     row["godkendt"] = "X" if submission_valid else ""
     row["godkendt_af"] = ""
     row["behandlet_ok"] = ""
