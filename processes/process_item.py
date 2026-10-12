@@ -18,7 +18,16 @@ def process_item(item_data: dict, item_reference: str):
 
     sharepoint_api = Sharepoint(**config.SHAREPOINT_KWARGS)
 
+    # Two databases: the submissions sit in the RPA database, the bevillinger
+    # they are validated against in Befordringssystemet.
     db_connection_string = os.getenv("DBCONNECTIONSTRINGPROD")
+    befordring_connection_string = os.getenv("DBCONNECTIONSTRINGBEFORDRING")
+
+    if not befordring_connection_string:
+        raise OSError(
+            "DBCONNECTIONSTRINGBEFORDRING is not set - bevillinger are read "
+            "from Befordringssystemet and cannot be validated without it"
+        )
 
     file_name = item_data.get("file_name")
     sheet_name = item_data.get("sheet_name")
@@ -31,6 +40,7 @@ def process_item(item_data: dict, item_reference: str):
         start_date=start_date,
         end_date=end_date,
         sheet_name=sheet_name,
+        befordring_connection_string=befordring_connection_string,
     )
 
     # mburpa_sharepoint_api = Sharepoint(**config.MBURPA_SHAREPOINT_KWARGS)
