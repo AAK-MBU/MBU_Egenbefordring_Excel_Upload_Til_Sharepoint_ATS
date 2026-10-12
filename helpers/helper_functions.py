@@ -379,7 +379,22 @@ def process_submission(sub, connection_string, befordrings_query):
             kommentar="Barnets CPR-nummer mangler i indberetningen",
         )
 
-    elevens_adresse = normalize_address(get_form_field(data, "barnets_adresse"))
+    # Compared against the bevilling: the address actually driven to and from,
+    # NOT the child's own address.
+    #
+    # Two reasons, and both produced false negatives:
+    #
+    # - A bevilling may legitimately grant driving to and from somewhere other
+    #   than the child's registered address, and then the two never match.
+    # - A child with navne- og adressebeskyttelse has their address written as
+    #   the protection placeholder rather than a street, so the comparison was
+    #   against a sentence rather than an address.
+    #
+    # adresse_der_blev_koert_til_fra is obligatory on the form, so it is always
+    # present and always the address the kilometres were driven between.
+    adresse_der_blev_koert_til_fra = normalize_address(
+        get_form_field(data, "adresse_der_blev_koert_til_fra")
+    )
 
     valgt_skole = data.get("skoleliste") or ""
     indtastet_skole = data.get("skriv_dit_barns_skole_eller_dagtilbud") or ""
@@ -523,7 +538,7 @@ def process_submission(sub, connection_string, befordrings_query):
                 kommentar="Indberettet skole matcher ikke barnets bevilling",
             )
 
-        if elevens_adresse != adresse_paa_fundet_bevilling:
+        if adresse_der_blev_koert_til_fra != adresse_paa_fundet_bevilling:
             return build_final_row(
                 data=data,
                 form_id=form_id,
