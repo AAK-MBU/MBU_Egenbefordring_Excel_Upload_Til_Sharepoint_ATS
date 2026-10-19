@@ -220,9 +220,10 @@ def export_egenbefordring_from_hub(
     #   ugedage          Koersel_Ugedag_LINK records which days were granted.
     #                    BefordringsData had no equivalent, so a claim for a
     #                    day nobody granted was simply paid.
-    #   tidspunkt        a lookup value rather than free text, so "morgen" and
-    #                    "eftermiddag" no longer have to be substring-matched
-    #                    out of whatever a caseworker typed.
+    #   rutetype         states where a trip starts and ends, so the granted
+    #                    legs are derived rather than substring-matched out of
+    #                    whatever a caseworker typed. It replaced tidspunkt,
+    #                    which answered the same question less precisely.
     #   gyldighed        per række, so a date is matched against the period
     #                    that actually grants it.
     #
@@ -233,7 +234,7 @@ def export_egenbefordring_from_hub(
         SELECT
             b.cpr_elev                                          AS CPR,
             k.bevilget_koereafstand_pr_vej                      AS BevilgetKoereAfstand,
-            t.tidspunkt_tekst                                   AS TidspunktForBevilling,
+            r.rutetype_tekst                                    AS RutetypeForBevilling,
             ba.adresse_tekst                                    AS ElevensAdresse,
             COALESCE(sm.matrikel_navn, uu.ungdomsuddannelse_navn)     AS SkoleNavnBefordring,
             COALESCE(sm.matrikel_adresse, uu.ungdomsuddannelse_adresse) AS SkolensAdresse,
@@ -249,7 +250,7 @@ def export_egenbefordring_from_hub(
         FROM       [befordring].[Koersel]          k
         INNER JOIN [befordring].[Bevilling]        b  ON b.bevilling_id        = k.bevilling_id
         INNER JOIN [befordring].[Befordringstype]  bt ON bt.befordringstype_id = k.befordringstype_id
-        LEFT JOIN  [befordring].[Tidspunkt]        t  ON t.tidspunkt_id        = k.tidspunkt_id
+        LEFT JOIN  [befordring].[Rutetype]         r  ON r.rutetype_id         = k.rutetype_id
         LEFT JOIN  [befordring].[Adresse]          ba ON ba.adresse_id         = b.adresse_id
         LEFT JOIN  [befordring].[Skolematrikel]    sm ON sm.matrikel_id        = b.matrikel_id
         LEFT JOIN  [befordring].[Ungdomsuddannelse] uu ON uu.ungdomsuddannelse_id = b.ungdomsuddannelse_id
@@ -430,7 +431,7 @@ def process_submission(sub, connection_string, befordrings_query):
     distance_example = None
     out_of_bevilling_dates = False
     entries_without_date = False
-    unreadable_tidspunkt = False
+    manglende_rutetype = False
     bevilling_kommentar = None
     # Dates driven on a weekday the bevilling does not grant. Collected rather
     # than breaking out, so the reviewer sees every one of them at once.
@@ -482,11 +483,12 @@ def process_submission(sub, connection_string, befordrings_query):
             ugedag_afvigelser.append(entry_date)
             continue
 
-        # tidspunkt comes from a lookup now, so this can only fire on a
-        # kørselsrække with no tidspunkt at all. Such a række grants nothing,
-        # and merging it would drop the row silently - including its distance.
+        # Both legs false can now only mean the kørselsrække has no rutetype
+        # at all — every one of the six grants at least one leg. Such a række
+        # cannot be checked, and merging it would drop the row silently,
+        # including its distance.
         if any(not m["allowed_morgen"] and not m["allowed_efter"] for m in matches):
-            unreadable_tidspunkt = True
+            manglende_rutetype = True
             break  # 🚫 immediate hard stop
 
         bevilling = resolve_bevilling_for_date(matches)
@@ -596,9 +598,9 @@ def process_submission(sub, connection_string, befordrings_query):
             kommentar="; ".join(comments),
         )
 
-    if unreadable_tidspunkt:
+    if manglende_rutetype:
         comments.append(
-            "Bevillingens tidspunkt er hverken morgen eller eftermiddag"
+            "Bevillingens kørselsrække mangler rutetype — kan ikke kontrolleres"
         )
         return build_final_row(
             data=data,
@@ -721,14 +723,14 @@ def normalize_bevillinger(rows):
     bevillinger = []
 
     for r in rows:
-        tid = (r.get("TidspunktForBevilling") or "").lower()
+        rutetype = (r.get("RutetypeForBevilling") or "").strip().lower()
 
         bevillinger.append(
             {
                 "from": to_date(r["BevillingFra"]),
                 "to": to_date(r["BevillingTil"]),
-                "allowed_morgen": "morgen" in tid,
-                "allowed_efter": "eftermiddag" in tid,
+                "allowed_morgen": _morgen_for_rutetype(rutetype),
+                "allowed_efter": _eftermiddag_for_rutetype(rutetype),
                 "allowed_distance": convert_value_to_float(
                     r.get("BevilgetKoereAfstand")
                 ) or 0,
@@ -1398,6 +1400,55 @@ def raekker_for_dato(bevillinger, d):
     ]
 
 
+# Which legs of the day each rutetype grants.
+#
+# Rutetype states where a trip starts and ends, so the legs follow from the
+# name. It replaced Tidspunkt, which stated the legs directly but could not
+# say which direction they ran in.
+#
+#   Fra hjem til skole           morgen only
+#   Mellem hjem og skole         both
+#   Mellem skole, klub, og hjem  both
+#   Fra skole til klub           eftermiddag
+#   Fra skole til hjem           eftermiddag
+#   Fra klub til hjem            eftermiddag
+#
+# Both "Mellem …" typer grant the whole day. That is Befordring's reading, and
+# it does not follow from reading the klub one literally: "skole -> klub ->
+# hjem" names only afternoon legs, but the bevilling it describes covers
+# driving all day, morning included. Do not "correct" it back from the name.
+#
+# Matched on prefixes rather than the six full names: "Mellem skole, klub, og
+# hjem" is spelled with a different second comma in Befordring's own documents
+# than in the lookup table, and an exact list would silently miss one of them.
+
+# Mellem = all day. Fra hjem = starts at home, so the morning leg.
+_MORGEN_PRAEFIKS = ("mellem", "fra hjem")
+
+# The only rutetype with no afternoon leg at all. Mirrors KUN_MORGEN in the
+# frontend's $lib/rutetype, which answers this same half of the question.
+_KUN_MORGEN = ("fra hjem til skole",)
+
+
+def _morgen_for_rutetype(rutetype: str) -> bool:
+    """Whether the rutetype grants a morning leg."""
+
+    return any(rutetype.startswith(praefiks) for praefiks in _MORGEN_PRAEFIKS)
+
+
+def _eftermiddag_for_rutetype(rutetype: str) -> bool:
+    """Whether the rutetype grants an afternoon leg.
+
+    An empty rutetype grants neither leg, which the caller treats as a
+    kørselsrække that cannot be checked — see the manglende_rutetype flag.
+    """
+
+    if not rutetype:
+        return False
+
+    return rutetype not in _KUN_MORGEN
+
+
 def tidspunkter_for_dato(raekker) -> tuple[bool, bool]:
     """
     Whether morning and afternoon driving is granted on a date.
@@ -1413,6 +1464,11 @@ def tidspunkter_for_dato(raekker) -> tuple[bool, bool]:
         morning leg and another the afternoon one on the same day, the
         citizen is granted both — taking either row alone would reject half
         the driving they were entitled to.
+
+        The name says "tidspunkter" because morning/afternoon is what it
+        ANSWERS. It no longer reads the Tidspunkt lookup: allowed_morgen and
+        allowed_efter are derived from the rutetype — see
+        _morgen_for_rutetype.
     """
 
     return (
