@@ -436,6 +436,10 @@ def process_submission(sub, connection_string, befordrings_query):
     # Dates driven on a weekday the bevilling does not grant. Collected rather
     # than breaking out, so the reviewer sees every one of them at once.
     ugedag_afvigelser = []
+    # Dates the citizen has reported more than once in the same submission.
+    # Collected the same way, and for the same reason.
+    sete_datoer = set()
+    dublet_datoer = []
 
     for entry in koerselsliste:
         entry_date = parse_entry_date(entry.get("dato"))
@@ -449,6 +453,21 @@ def process_submission(sub, connection_string, befordrings_query):
             ):
                 entries_without_date = True
             continue
+
+        # The same date reported twice is two claims for one day's driving.
+        # Nothing further down counts how often a date appears — the amount is
+        # "antal gyldige ture × bevilget afstand × takst", summed per entry —
+        # so a repeat is simply paid again. Caught here, before any `continue`
+        # below can skip past it.
+        #
+        # Only rows where a leg was actually ticked count. A repeat row left
+        # blank but carrying a date claims nothing, and flagging it would send
+        # clean submissions to a reviewer for no reason.
+        if is_leg_driven(entry, "til_skole") or is_leg_driven(entry, "til_hjem"):
+            if entry_date in sete_datoer:
+                dublet_datoer.append(entry_date)
+            else:
+                sete_datoer.add(entry_date)
 
         # Everything covering the date, before narrowing by weekday. The
         # comment check runs on this wider set: a caseworker's note on ANY
@@ -602,6 +621,24 @@ def process_submission(sub, connection_string, befordrings_query):
         comments.append(
             "Bevillingens kørselsrække mangler rutetype — kan ikke kontrolleres"
         )
+        return build_final_row(
+            data=data,
+            form_id=form_id,
+            modtagelsesdato=modtagelsesdato,
+            submission_valid=False,
+            kommentar="; ".join(comments),
+        )
+
+    if dublet_datoer:
+        datoer = ", ".join(d.strftime("%d-%m-%Y") for d in sorted(set(dublet_datoer)))
+        comments.append(
+            f"Samme kørselsdato er indberettet flere gange: {datoer}"
+        )
+        # Manual handling rather than merging the rows or rejecting outright.
+        # The robot cannot tell a double-tap on a repeat row from two genuine
+        # trips in one day, and merging would silently pick one answer. Same
+        # reasoning as the ugedag rule below: the expensive mistake is refusing
+        # a citizen money they are owed, so a human decides.
         return build_final_row(
             data=data,
             form_id=form_id,

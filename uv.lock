@@ -314,7 +314,7 @@ wheels = [
 
 [[package]]
 name = "mbu-egenbefordring-excel-upload-til-sharepoint-ats"
-version = "2.1.0"
+version = "3.1.0"
 source = { virtual = "." }
 dependencies = [
     { name = "automation-server-client" },

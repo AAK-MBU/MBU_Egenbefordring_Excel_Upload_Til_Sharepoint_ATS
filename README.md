@@ -91,6 +91,11 @@ A local `.env` file is picked up automatically.
      submission goes to manual handling — there is no way to tell which one the citizen drove under. So does a
      bevilling whose `TidspunktForBevilling` reads as neither morgen nor eftermiddag, since it grants nothing
      and cannot safely be ignored.
+   - **Sent to manual handling** when the same driving date appears more than once in `koerselsliste`. The
+     dates are listed in `evt_kommentar`. Nothing else counts how often a date appears, so before this check a
+     repeat was paid twice over. Only rows with a leg actually ticked count — a blank repeat row carrying a
+     date claims nothing. Not merged and not rejected: the robot cannot tell a double-tap from two genuine
+     trips in one day, so a human decides.
    - **Sent to manual handling** when driving is reported on a weekday the bevilling does not grant. The dates
      are listed in `evt_kommentar`. Deliberately NOT an automatic rejection: it is the newest rule in the robot
      and the expensive mistake is refusing a citizen money they are owed, so the first version only tells a

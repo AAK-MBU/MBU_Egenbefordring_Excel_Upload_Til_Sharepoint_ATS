@@ -119,6 +119,22 @@ validating it. That is deliberate: the alternative is paying the school legs and
 silence, which underpays the citizen with nothing on the sheet to show it. Remove the guard only once the klub
 leg can actually be priced.
 
+### The same date reported twice
+
+`koerselsliste` is whatever the form submitted, and the citizen can put the same date on two rows. Nothing
+downstream counts how often a date appears — the amount is `antal gyldige ture × bevilget afstand × takst`,
+accumulated per entry — so before this check a repeat was simply paid again. A caseworker found one in
+September 2026: 24/9 reported twice, spotted only because the submission happened to reach manual handling
+for an unrelated reason.
+
+`process_submission` now collects repeated dates and sends the submission to manual handling, naming them in
+`evt_kommentar`. Only rows where a leg was actually ticked count: a repeat row left blank but carrying a date
+claims nothing, and flagging it would send clean submissions to a reviewer for no reason.
+
+Deliberately not merged into one day, and not rejected. The robot cannot tell a double-tap on a repeat row
+from two genuine trips in one day, and merging would silently pick an answer. Same reasoning as the ugedag
+rule: the expensive mistake is refusing a citizen money they are owed, so a human decides.
+
 ### Multiple bevillinger on one date
 
 `resolve_bevilling_for_date` reduces the bevillinger active on a date to the one that applies. Rows that are
